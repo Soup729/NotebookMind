@@ -1,0 +1,56 @@
+app:
+  name: "enterprise-pdf-ai"
+  env: "development"
+  port: 8080
+
+log:
+  level: "debug"
+  file_path: "logs/app.log"
+  max_size: 100
+  max_backups: 3
+  max_age: 7
+  compress: true
+
+database:
+  postgres:
+    dsn: "host=localhost user=postgres password=postgres dbname=pdf_ai port=5432 sslmode=disable TimeZone=Asia/Shanghai"
+    max_idle_conns: 10
+    max_open_conns: 100
+    conn_max_lifetime: 3600
+
+cache:
+  redis:
+    addr: "localhost:6379"
+    password: ""
+    db: 0
+    pool_size: 100
+    min_idle_conns: 10
+
+milvus:
+  address: ""
+  username: ""
+  password: ""
+  collection_name: "pdf_chunks"
+  dimension: 1536
+
+llm:
+  openai:
+    api_key: ""
+    base_url: "https://api.openai.com/v1"
+    embedding_model: "text-embedding-3-small"
+    chat_model: "gpt-4o-mini"
+
+auth:
+  jwt_secret: ""
+
+upload:
+  local_dir: "tmp/uploads"
+  max_file_size_mb: 20
+  allowed_ext_name: ".pdf"
+
+asynq:
+  concurrency: 10
+
+chat:
+  history_limit: 20
+  retrieval_top_k: 5
