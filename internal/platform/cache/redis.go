@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"enterprise-pdf-ai/internal/configs"
+	"NotebookAI/internal/configs"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )

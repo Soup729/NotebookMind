@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -8,36 +9,35 @@ import (
 	"strings"
 	"time"
 
-	"enterprise-pdf-ai/internal/api/middleware"
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/worker"
-	"enterprise-pdf-ai/internal/worker/tasks"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
+	"NotebookAI/internal/service"
+	"NotebookAI/internal/worker"
+	"NotebookAI/internal/worker/tasks"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 type DocumentHandler struct {
-	producer  worker.TaskProducer
-	uploadCfg configs.UploadConfig
+	producer        worker.TaskProducer
+	documentService service.DocumentService
+	uploadCfg       configs.UploadConfig
 }
 
-func NewDocumentHandler(producer worker.TaskProducer, uploadCfg configs.UploadConfig) *DocumentHandler {
+func NewDocumentHandler(producer worker.TaskProducer, documentService service.DocumentService, uploadCfg configs.UploadConfig) *DocumentHandler {
 	return &DocumentHandler{
-		producer:  producer,
-		uploadCfg: uploadCfg,
+		producer:        producer,
+		documentService: documentService,
+		uploadCfg:       uploadCfg,
 	}
 }
 
 func (h *DocumentHandler) UploadDocument(c *gin.Context) {
-	userIDRaw, ok := c.Get(middleware.ContextUserIDKey)
+	userID, ok := getUserID(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
-		return
-	}
-	userID, ok := userIDRaw.(string)
-	if !ok || strings.TrimSpace(userID) == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user context"})
 		return
 	}
 
@@ -75,6 +75,20 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 		return
 	}
 
+	document := &models.Document{
+		ID:         documentID,
+		UserID:     userID,
+		FileName:   fileHeader.Filename,
+		StoredPath: storedPath,
+		Status:     models.DocumentStatusProcessing,
+		FileSize:   fileHeader.Size,
+	}
+	if err := h.documentService.Create(c.Request.Context(), document); err != nil {
+		zap.L().Error("persist document metadata failed", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist document"})
+		return
+	}
+
 	taskPayload := tasks.ProcessDocumentPayload{
 		TaskID:     uuid.NewString(),
 		UserID:     userID,
@@ -82,7 +96,6 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 		FileName:   fileHeader.Filename,
 		DocumentID: documentID,
 	}
-
 	taskID, err := h.producer.EnqueueProcessDocument(c.Request.Context(), taskPayload)
 	if err != nil {
 		zap.L().Error("enqueue process document task failed", zap.Error(err))
@@ -90,9 +103,81 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"task_id":     taskID,
-		"document_id": documentID,
-		"status":      "processing",
-	})
+	c.JSON(http.StatusAccepted, documentResponse(document, taskID))
+}
+
+func (h *DocumentHandler) ListDocuments(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	documents, err := h.documentService.List(c.Request.Context(), userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list documents"})
+		return
+	}
+
+	items := make([]gin.H, 0, len(documents))
+	for _, document := range documents {
+		items = append(items, documentResponse(&document, ""))
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (h *DocumentHandler) GetDocument(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	document, err := h.documentService.Get(c.Request.Context(), userID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load document"})
+		return
+	}
+	c.JSON(http.StatusOK, documentResponse(document, ""))
+}
+
+func (h *DocumentHandler) DeleteDocument(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	if err := h.documentService.Delete(c.Request.Context(), userID, c.Param("id")); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete document"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func documentResponse(document *models.Document, taskID string) gin.H {
+	response := gin.H{
+		"id":            document.ID,
+		"file_name":     document.FileName,
+		"status":        document.Status,
+		"error_message": document.ErrorMessage,
+		"file_size":     document.FileSize,
+		"chunk_count":   document.ChunkCount,
+		"created_at":    document.CreatedAt,
+		"updated_at":    document.UpdatedAt,
+		"processed_at":  document.ProcessedAt,
+	}
+	if taskID != "" {
+		response["task_id"] = taskID
+	}
+	return response
 }

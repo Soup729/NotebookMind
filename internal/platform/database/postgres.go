@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"enterprise-pdf-ai/internal/configs"
+	"NotebookAI/internal/configs"
 	"go.uber.org/zap"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

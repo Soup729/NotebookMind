@@ -9,12 +9,12 @@ import (
 	"syscall"
 	"time"
 
-	"enterprise-pdf-ai/internal/api/router"
-	"enterprise-pdf-ai/internal/app"
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/platform/cache"
-	"enterprise-pdf-ai/internal/platform/database"
-	"enterprise-pdf-ai/internal/platform/logger"
+	"NotebookAI/internal/api/router"
+	"NotebookAI/internal/app"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/platform/cache"
+	"NotebookAI/internal/platform/database"
+	"NotebookAI/internal/platform/logger"
 
 	"go.uber.org/zap"
 )
@@ -48,7 +48,18 @@ func main() {
 	}
 	defer container.TaskProducer.Close()
 
-	engine := router.New(cfg, container.DocumentHandler, container.ChatHandler)
+	engine := router.New(
+		cfg,
+		container.AuthHandler,
+		container.DocumentHandler,
+		container.ChatHandler,
+		container.DashboardHandler,
+		container.SearchHandler,
+		container.UsageHandler,
+		container.NotebookHandler,
+		container.NoteHandler,
+		container.VQAHandler,
+	)
 	engine.MaxMultipartMemory = cfg.Upload.MaxFileSizeMB << 20
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.App.Port),

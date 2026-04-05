@@ -1,0 +1,8 @@
+.env
+.gocache/
+logs/
+tmp/
+*.exe
+enterprise-pdf-web/.env.local
+enterprise-pdf-web/node_modules/
+enterprise-pdf-web/.next/

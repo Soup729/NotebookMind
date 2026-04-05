@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"enterprise-pdf-ai/internal/app"
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/platform/cache"
-	"enterprise-pdf-ai/internal/platform/database"
-	"enterprise-pdf-ai/internal/platform/logger"
-	"enterprise-pdf-ai/internal/worker"
+	"NotebookAI/internal/app"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/platform/cache"
+	"NotebookAI/internal/platform/database"
+	"NotebookAI/internal/platform/logger"
+	"NotebookAI/internal/worker"
 	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
 )
@@ -41,7 +41,7 @@ func main() {
 	}
 	defer container.TaskProducer.Close()
 
-	processor := worker.NewDocumentProcessor(container.LLMService)
+	processor := worker.NewDocumentProcessor(container.LLMService, container.DocumentRepository)
 	mux := asynq.NewServeMux()
 	processor.RegisterHandlers(mux)
 

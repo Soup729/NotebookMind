@@ -19,8 +19,11 @@ func JWTAuth(jwtSecret string) gin.HandlerFunc {
 			return
 		}
 
-		tokenString, found := strings.CutPrefix(authHeader, "Bearer ")
-		if !found || strings.TrimSpace(tokenString) == "" {
+		tokenString := strings.TrimSpace(authHeader)
+		if trimmed, found := strings.CutPrefix(tokenString, "Bearer "); found {
+			tokenString = strings.TrimSpace(trimmed)
+		}
+		if tokenString == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid bearer token"})
 			return
 		}
