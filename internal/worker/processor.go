@@ -9,6 +9,8 @@ import (
 	"io"
 	"strings"
 
+	"enterprise-pdf-ai/internal/models"
+	"enterprise-pdf-ai/internal/repository"
 	"enterprise-pdf-ai/internal/service"
 	"enterprise-pdf-ai/internal/worker/tasks"
 	"github.com/hibiken/asynq"
@@ -20,10 +22,14 @@ import (
 
 type DocumentProcessor struct {
 	llmService service.LLMService
+	documents  repository.DocumentRepository
 }
 
-func NewDocumentProcessor(llmService service.LLMService) *DocumentProcessor {
-	return &DocumentProcessor{llmService: llmService}
+func NewDocumentProcessor(llmService service.LLMService, documents repository.DocumentRepository) *DocumentProcessor {
+	return &DocumentProcessor{
+		llmService: llmService,
+		documents:  documents,
+	}
 }
 
 func (p *DocumentProcessor) RegisterHandlers(mux *asynq.ServeMux) {
@@ -39,11 +45,12 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 	zap.L().Info("start processing document task",
 		zap.String("task_id", payload.TaskID),
 		zap.String("user_id", payload.UserID),
-		zap.String("file_path", payload.FilePath),
+		zap.String("document_id", payload.DocumentID),
 	)
 
 	content, err := extractPDFText(payload.FilePath)
 	if err != nil {
+		_ = p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusFailed, 0, err.Error())
 		return fmt.Errorf("extract pdf text: %w", err)
 	}
 
@@ -54,6 +61,7 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 
 	chunks, err := splitter.SplitText(content)
 	if err != nil {
+		_ = p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusFailed, 0, err.Error())
 		return fmt.Errorf("split content into chunks: %w", err)
 	}
 
@@ -77,11 +85,23 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 	}
 
 	if len(docs) == 0 {
-		return fmt.Errorf("document contains no indexable chunks")
+		err := fmt.Errorf("document contains no indexable chunks")
+		_ = p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusFailed, 0, err.Error())
+		return err
+	}
+
+	if err := p.llmService.DeleteDocumentChunks(ctx, payload.UserID, payload.DocumentID); err != nil {
+		_ = p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusFailed, 0, err.Error())
+		return fmt.Errorf("delete old chunks: %w", err)
 	}
 
 	if err := p.llmService.IndexDocuments(ctx, docs); err != nil {
-		return fmt.Errorf("index documents into milvus: %w", err)
+		_ = p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusFailed, 0, err.Error())
+		return fmt.Errorf("index documents into vector store: %w", err)
+	}
+
+	if err := p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusCompleted, len(docs), ""); err != nil {
+		return fmt.Errorf("update document status: %w", err)
 	}
 
 	zap.L().Info("document task processed",
@@ -116,7 +136,6 @@ func extractPDFText(filePath string) (string, error) {
 		if _, err = io.Copy(&buf, strings.NewReader(pageText)); err != nil {
 			return "", fmt.Errorf("copy page %d text: %w", i, err)
 		}
-
 		buf.WriteString("\n")
 	}
 
@@ -124,6 +143,5 @@ func extractPDFText(filePath string) (string, error) {
 	if content == "" {
 		return "", errors.New("pdf content is empty")
 	}
-
 	return content, nil
 }

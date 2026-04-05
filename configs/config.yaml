@@ -13,14 +13,14 @@ log:
 
 database:
   postgres:
-    dsn: "host=localhost user=postgres password=postgres dbname=pdf_ai port=5432 sslmode=disable TimeZone=Asia/Shanghai"
+    dsn: "host=localhost user=postgres password=postgres dbname=pdf_ai port=5433 sslmode=disable TimeZone=Asia/Shanghai"
     max_idle_conns: 10
     max_open_conns: 100
     conn_max_lifetime: 3600
 
 cache:
   redis:
-    addr: "localhost:6379"
+    addr: "localhost:6380"
     password: ""
     db: 0
     pool_size: 100

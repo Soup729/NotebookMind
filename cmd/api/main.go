@@ -48,7 +48,17 @@ func main() {
 	}
 	defer container.TaskProducer.Close()
 
-	engine := router.New(cfg, container.DocumentHandler, container.ChatHandler)
+	engine := router.New(
+		cfg,
+		container.AuthHandler,
+		container.DocumentHandler,
+		container.ChatHandler,
+		container.DashboardHandler,
+		container.SearchHandler,
+		container.UsageHandler,
+		container.NotebookHandler,
+		container.NoteHandler,
+	)
 	engine.MaxMultipartMemory = cfg.Upload.MaxFileSizeMB << 20
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.App.Port),

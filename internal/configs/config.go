@@ -167,8 +167,13 @@ func validateConfig(cfg *Config) error {
 	if strings.TrimSpace(cfg.LLM.OpenAI.APIKey) == "" {
 		return fmt.Errorf("missing required config OPENAI_API_KEY")
 	}
-	if strings.TrimSpace(cfg.Milvus.Password) == "" {
-		return fmt.Errorf("missing required config MILVUS_PASSWORD")
+	milvusAddress := strings.TrimSpace(cfg.Milvus.Address)
+	milvusPassword := strings.TrimSpace(cfg.Milvus.Password)
+	if milvusAddress != "" && milvusPassword == "" {
+		return fmt.Errorf("MILVUS_PASSWORD is required when MILVUS_ADDRESS is set")
+	}
+	if milvusAddress == "" && milvusPassword != "" {
+		return fmt.Errorf("MILVUS_ADDRESS is required when MILVUS_PASSWORD is set")
 	}
 	if cfg.Chat.HistoryLimit <= 0 {
 		return fmt.Errorf("CHAT_HISTORY_LIMIT must be greater than 0")
