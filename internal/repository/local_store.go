@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"enterprise-pdf-ai/internal/models"
+	"NotebookAI/internal/models"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/embeddings"
 	"github.com/tmc/langchaingo/schema"

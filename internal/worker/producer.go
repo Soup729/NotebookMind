@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/worker/tasks"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/worker/tasks"
 	"github.com/hibiken/asynq"
 	"go.uber.org/zap"
 )

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/repository"
 )
 
 type DashboardOverview struct {

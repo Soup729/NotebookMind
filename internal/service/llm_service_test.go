@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/platform/logger"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/platform/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tmc/langchaingo/schema"
@@ -31,11 +31,14 @@ func TestLLMServiceAndMilvusIntegration(t *testing.T) {
 	}
 
 	llmCfg := &configs.LLMConfig{
-		OpenAI: configs.OpenAIConfig{
-			APIKey:         openAIKey,
-			BaseURL:        "https://api.openai.com/v1",
-			EmbeddingModel: "text-embedding-3-small",
-			ChatModel:      "gpt-4o-mini",
+		DefaultProvider: "openai",
+		Providers: configs.LLMProviderConfig{
+			OpenAI: configs.OpenAIConfig{
+				APIKey:         openAIKey,
+				BaseURL:        "https://api.openai.com/v1",
+				EmbeddingModel: "text-embedding-3-small",
+				ChatModel:      "gpt-4o-mini",
+			},
 		},
 	}
 

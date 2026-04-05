@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"enterprise-pdf-ai/internal/configs"
+	"NotebookAI/internal/configs"
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 	"github.com/tmc/langchaingo/embeddings"

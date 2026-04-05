@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"enterprise-pdf-ai/internal/service"
+	"NotebookAI/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -37,7 +37,19 @@ func (h *SearchHandler) Search(c *gin.Context) {
 		}
 	}
 
-	results, err := h.chatService.Search(c.Request.Context(), userID, query, topK)
+	// Parse optional document_ids for dynamic source scoping
+	var documentIDs []string
+	if rawIDs := strings.TrimSpace(c.Query("document_ids")); rawIDs != "" {
+		ids := strings.Split(rawIDs, ",")
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id != "" {
+				documentIDs = append(documentIDs, id)
+			}
+		}
+	}
+
+	results, err := h.chatService.Search(c.Request.Context(), userID, query, topK, documentIDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search documents"})
 		return

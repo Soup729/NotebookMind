@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"enterprise-pdf-ai/internal/api/middleware"
-	"enterprise-pdf-ai/internal/service"
+	"NotebookAI/internal/api/middleware"
+	"NotebookAI/internal/service"
 	"github.com/gin-gonic/gin"
 )
 

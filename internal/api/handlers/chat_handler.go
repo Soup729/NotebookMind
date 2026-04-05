@@ -3,13 +3,15 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/repository"
-	"enterprise-pdf-ai/internal/service"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
+	"NotebookAI/internal/service"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type ChatHandler struct {
@@ -21,7 +23,8 @@ type createSessionRequest struct {
 }
 
 type messageRequest struct {
-	Question string `json:"question" binding:"required,min=1,max=4000"`
+	Question    string   `json:"question" binding:"required,min=1,max=4000"`
+	DocumentIDs []string `json:"document_ids"`
 }
 
 func NewChatHandler(chatService service.ChatService) *ChatHandler {
@@ -104,7 +107,7 @@ func (h *ChatHandler) SendMessage(c *gin.Context) {
 		return
 	}
 
-	reply, err := h.chatService.SendMessage(c.Request.Context(), userID, c.Param("id"), strings.TrimSpace(req.Question))
+	reply, err := h.chatService.SendMessage(c.Request.Context(), userID, c.Param("id"), strings.TrimSpace(req.Question), req.DocumentIDs)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
@@ -149,4 +152,154 @@ func chatMessageResponse(message models.ChatMessage) gin.H {
 
 func isEmptyBodyError(err error) bool {
 	return strings.Contains(err.Error(), "EOF")
+}
+
+// StreamSendMessage handles SSE streaming chat
+func (h *ChatHandler) StreamSendMessage(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	sessionID := c.Param("id")
+
+	var req messageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Transfer-Encoding", "chunked")
+	c.Header("X-Accel-Buffering", "no") // Disable nginx buffering
+
+	sessionIDFinal := sessionID
+
+	// Stream response using callbacks
+	err := h.chatService.StreamSendMessage(c.Request.Context(), service.StreamChatOptions{
+		UserID:      userID,
+		SessionID:   sessionID,
+		Question:    strings.TrimSpace(req.Question),
+		DocumentIDs: req.DocumentIDs,
+		OnSource: func(sources []service.ChatSource, promptTokens int) bool {
+			event := service.SourceEvent{
+				SessionID:    sessionIDFinal,
+				MessageID:    "", // Will be set after generation
+				Sources:      sources,
+				PromptTokens: promptTokens,
+			}
+			data, _ := json.Marshal(event)
+			_, err := c.Writer.WriteString(fmt.Sprintf("event: source\ndata: %s\n\n", data))
+			if err != nil {
+				return false
+			}
+			c.Writer.Flush()
+			return true
+		},
+		OnToken: func(token string) bool {
+			event := service.TokenEvent{
+				SessionID: sessionIDFinal,
+				MessageID: "", // Will be set after generation
+				Token:     token,
+			}
+			data, _ := json.Marshal(event)
+			_, err := c.Writer.WriteString(fmt.Sprintf("event: token\ndata: %s\n\n", data))
+			if err != nil {
+				return false
+			}
+			c.Writer.Flush()
+			return true
+		},
+		OnDone: func(content string, promptTokens, completionTokens, totalTokens int) bool {
+			event := service.DoneEvent{
+				SessionID:        sessionIDFinal,
+				MessageID:        "", // Will be set after generation
+				Content:          content,
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      totalTokens,
+			}
+			data, _ := json.Marshal(event)
+			_, err := c.Writer.WriteString(fmt.Sprintf("event: done\ndata: %s\n\n", data))
+			if err != nil {
+				return false
+			}
+			c.Writer.Flush()
+			return true
+		},
+		OnError: func(err error) bool {
+			event := service.ErrorEvent{
+				SessionID: sessionIDFinal,
+				MessageID: "",
+				Error:     err.Error(),
+			}
+			data, _ := json.Marshal(event)
+			_, writeErr := c.Writer.WriteString(fmt.Sprintf("event: error\ndata: %s\n\n", data))
+			if writeErr != nil {
+				return false
+			}
+			c.Writer.Flush()
+			return true
+		},
+	})
+
+	if err != nil {
+		zap.L().Error("stream chat failed", zap.Error(err))
+		// Error already sent via callback
+		return
+	}
+
+	// Send completion marker
+	c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
+}
+
+// GetRecommendations returns recommended follow-up questions
+func (h *ChatHandler) GetRecommendations(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	sessionID := c.Param("id")
+
+	questions, err := h.chatService.GenerateRecommendedQuestions(c.Request.Context(), userID, sessionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate recommendations"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"session_id": sessionID,
+		"questions":  questions,
+	})
+}
+
+// GetReflection returns an AI reflection on a specific message
+func (h *ChatHandler) GetReflection(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	sessionID := c.Param("id")
+	messageID := c.Param("messageId")
+
+	reflection, err := h.chatService.GenerateReflection(c.Request.Context(), userID, sessionID, messageID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to generate reflection: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"session_id": sessionID,
+		"message_id": messageID,
+		"reflection": reflection,
+	})
 }

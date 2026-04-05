@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/repository"
 
 	"go.uber.org/zap"
 )

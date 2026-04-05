@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"enterprise-pdf-ai/internal/models"
+	"NotebookAI/internal/models"
 	"gorm.io/gorm"
 )
 

@@ -1,4 +1,4 @@
-module enterprise-pdf-ai
+module NotebookAI
 
 go 1.24.0
 

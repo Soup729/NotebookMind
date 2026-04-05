@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"enterprise-pdf-ai/internal/configs"
+	"NotebookAI/internal/configs"
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 	"go.uber.org/zap"
@@ -15,8 +15,6 @@ import (
 const (
 	// NotebookCollectionName is the Milvus collection for NotebookLM chunks
 	NotebookCollectionName = "notebook_chunks"
-	// NotebookVectorDim is the dimension for embedding vectors (text-embedding-3-small)
-	NotebookVectorDim = 1536
 )
 
 // NotebookChunk represents a chunk stored in Milvus for NotebookLM
@@ -75,7 +73,7 @@ func NewNotebookMilvusStore(ctx context.Context, cfg *configs.MilvusConfig) (Not
 	}
 
 	// Ensure collection exists with compatible schema
-	if err := ensureNotebookCollection(ctx, cli, collectionName, NotebookVectorDim); err != nil {
+	if err := ensureNotebookCollection(ctx, cli, collectionName, cfg.Dimension); err != nil {
 		return nil, fmt.Errorf("ensure notebook collection: %w", err)
 	}
 
@@ -85,13 +83,13 @@ func NewNotebookMilvusStore(ctx context.Context, cfg *configs.MilvusConfig) (Not
 
 	zap.L().Info("Notebook Milvus vector store ready",
 		zap.String("collection", collectionName),
-		zap.Int("dimension", NotebookVectorDim),
+		zap.Int("dimension", cfg.Dimension),
 	)
 
 	return &notebookMilvusRepo{
 		cli:       cli,
 		colName:   collectionName,
-		dimension: NotebookVectorDim,
+		dimension: cfg.Dimension,
 	}, nil
 }
 

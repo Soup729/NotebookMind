@@ -1,5 +1,5 @@
 app:
-  name: "enterprise-pdf-ai"
+  name: "NotebookAI"
   env: "development"
   port: 8080
 
@@ -34,11 +34,32 @@ milvus:
   dimension: 1536
 
 llm:
-  openai:
-    api_key: ""
-    base_url: "https://api.openai.com/v1"
-    embedding_model: "text-embedding-3-small"
-    chat_model: "gpt-4o-mini"
+  # Default provider: openai, anthropic, gemini, azure-openai
+  default_provider: "openai"
+  # Model configurations per provider
+  providers:
+    openai:
+      api_key: ""
+      base_url: "https://api.openai.com/v1"
+      embedding_model: "text-embedding-3-small"
+      chat_model: "gpt-4o-mini"
+      vision_model: "gpt-4o-mini"  # For VQA
+    anthropic:
+      api_key: ""
+      base_url: "https://api.anthropic.com/v1"
+      chat_model: "claude-3-5-sonnet-20241022"
+      vision_model: "claude-3-5-sonnet-20241022"
+    gemini:
+      api_key: ""
+      base_url: "https://generativelanguage.googleapis.com/v1beta"
+      chat_model: "gemini-2.0-flash"
+      vision_model: "gemini-2.0-flash"
+    azure-openai:
+      api_key: ""
+      base_url: "https://YOUR_RESOURCE.openai.azure.com"
+      embedding_model: "text-embedding-3-small"
+      chat_model: "gpt-4o-mini"
+      api_version: "2024-02-01"
 
 auth:
   jwt_secret: ""

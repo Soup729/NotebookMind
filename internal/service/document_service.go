@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
 )
 
 type DocumentService interface {

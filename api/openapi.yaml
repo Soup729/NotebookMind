@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: Enterprise PDF AI API
+  title: NotebookAI API
   version: 1.0.0
 servers:
   - url: http://localhost:8080/api/v1
@@ -74,6 +74,85 @@ paths:
           required: true
           schema:
             type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                document_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional document IDs to scope the retrieval
+  /chat/sessions/{id}/stream:
+    post:
+      summary: Send a message and stream response via SSE
+      description: |
+        Server-Sent Events (SSE) endpoint for real-time streaming responses.
+
+        **Event Types:**
+        - `source`: Sent first with retrieved context sources
+        - `token`: Streaming response tokens (chunks of ~20 chars)
+        - `done`: Completion signal with final stats
+        - `error`: Error event
+
+        **Example JavaScript Client:**
+        ```javascript
+        const eventSource = new EventSource('/api/v1/chat/sessions/{id}/stream', {
+          method: 'POST',
+          body: JSON.stringify({ question: '...' }),
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ...' }
+        });
+        eventSource.addEventListener('source', (e) => {
+          const sources = JSON.parse(e.data);
+        });
+        eventSource.addEventListener('token', (e) => {
+          const token = JSON.parse(e.data);
+          // append token.token to UI
+        });
+        eventSource.addEventListener('done', (e) => {
+          const stats = JSON.parse(e.data);
+        });
+        ```
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                  description: The question to ask
+                document_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional document IDs to scope the retrieval
+      responses:
+        '200':
+          description: SSE stream established
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: text/event-stream
+            Cache-Control:
+              schema:
+                type: string
+                example: no-cache
+            Connection:
+              schema:
+                type: string
+                example: keep-alive
   /search:
     get:
       summary: Semantic search across indexed documents
@@ -88,3 +167,192 @@ paths:
           required: false
           schema:
             type: integer
+        - in: query
+          name: document_ids
+          required: false
+          schema:
+            type: string
+          description: Comma-separated list of document IDs to scope the search
+  /chat/sessions/{id}/recommendations:
+    post:
+      summary: Get recommended follow-up questions
+      description: |
+        Generates suggested follow-up questions based on the conversation context.
+        Returns 3 default questions if generation fails.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of recommended questions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                  questions:
+                    type: array
+                    items:
+                      type: string
+  /chat/sessions/{id}/messages/{messageId}/reflection:
+    post:
+      summary: Get AI reflection on a specific message
+      description: |
+        Analyzes an assistant's response and provides feedback including:
+        - Accuracy score (1-5)
+        - Completeness score (1-5)
+        - Source coverage analysis
+        - Missing aspects
+        - Suggested improvements
+        - Confidence level
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: messageId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Reflection analysis
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                  message_id:
+                    type: string
+                  reflection:
+                    type: object
+                    properties:
+                      accuracy_score:
+                        type: integer
+                        description: 1-5 rating
+                      completeness_score:
+                        type: integer
+                        description: 1-5 rating
+                      source_coverage:
+                        type: array
+                        items:
+                          type: string
+                      missing_aspects:
+                        type: array
+                        items:
+                          type: string
+                      suggested_improvements:
+                        type: array
+                        items:
+                          type: string
+                      confidence_level:
+                        type: string
+                        enum: [high, medium, low]
+  /vqa/image:
+    post:
+      summary: Ask a question about an uploaded image
+      description: |
+        Visual Question Answering endpoint. Upload an image file and ask a question about it.
+        Supports JPEG, PNG, GIF, and WebP formats. Maximum image size is 10MB.
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                  description: The question to ask about the image
+                image:
+                  type: string
+                  format: binary
+                  description: Image file
+      responses:
+        '200':
+          description: VQA response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer:
+                    type: string
+                  prompt_tokens:
+                    type: integer
+                  completion_tokens:
+                    type: integer
+                  total_tokens:
+                    type: integer
+  /vqa/image-url:
+    post:
+      summary: Ask a question about an image from a URL
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - question
+                - image_url
+              properties:
+                question:
+                  type: string
+                image_url:
+                  type: string
+                  format: uri
+      responses:
+        '200':
+          description: VQA response
+  /vqa/image-context:
+    post:
+      summary: Ask a question about an image with knowledge base context
+      description: |
+        Combines VQA with knowledge base retrieval. The answer is enhanced
+        with relevant documents from the user's knowledge base if document_ids are provided.
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                question:
+                  type: string
+                image:
+                  type: string
+                  format: binary
+                document_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional document IDs to scope knowledge base context
+      responses:
+        '200':
+          description: Enhanced VQA response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer:
+                    type: string
+                    description: Final answer (possibly enhanced with context)
+                  image_answer:
+                    type: string
+                    description: Original VQA answer before enhancement
+                  prompt_tokens:
+                    type: integer
+                  completion_tokens:
+                    type: integer
+                  total_tokens:
+                    type: integer
+                  context_enhanced:
+                    type: boolean

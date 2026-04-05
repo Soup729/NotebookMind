@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"enterprise-pdf-ai/internal/models"
+	"NotebookAI/internal/models"
 
 	"go.uber.org/zap"
 )

@@ -3,9 +3,9 @@ package router
 import (
 	"net/http"
 
-	"enterprise-pdf-ai/internal/api/handlers"
-	"enterprise-pdf-ai/internal/api/middleware"
-	"enterprise-pdf-ai/internal/configs"
+	"NotebookAI/internal/api/handlers"
+	"NotebookAI/internal/api/middleware"
+	"NotebookAI/internal/configs"
 	"github.com/gin-gonic/gin"
 )
 
@@ -19,6 +19,7 @@ func New(
 	usageHandler *handlers.UsageHandler,
 	notebookHandler *handlers.NotebookHandler,
 	noteHandler *handlers.NoteHandler,
+	vqaHandler *handlers.VQAHandler,
 ) *gin.Engine {
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -60,6 +61,9 @@ func New(
 		protected.POST("/chat/sessions", chatHandler.CreateSession)
 		protected.GET("/chat/sessions/:id/messages", chatHandler.ListMessages)
 		protected.POST("/chat/sessions/:id/messages", chatHandler.SendMessage)
+		protected.POST("/chat/sessions/:id/stream", chatHandler.StreamSendMessage)
+		protected.POST("/chat/sessions/:id/recommendations", chatHandler.GetRecommendations)
+		protected.POST("/chat/sessions/:id/messages/:messageId/reflection", chatHandler.GetReflection)
 
 		protected.GET("/search", searchHandler.Search)
 
@@ -98,6 +102,11 @@ func New(
 		protected.POST("/notes/:id/tags", noteHandler.AddTag)
 		protected.DELETE("/notes/:id/tags", noteHandler.RemoveTag)
 		protected.GET("/notes/tags/search", noteHandler.SearchByTag)
+
+		// VQA (Visual Question Answering)
+		protected.POST("/vqa/image", vqaHandler.AskImage)
+		protected.POST("/vqa/image-url", vqaHandler.AskImageURL)
+		protected.POST("/vqa/image-context", vqaHandler.AskWithContext)
 	}
 
 	return r

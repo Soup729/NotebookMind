@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strings"
 
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/repository"
-	"enterprise-pdf-ai/internal/service"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
+	"NotebookAI/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/tmc/langchaingo/embeddings"
 	"go.uber.org/zap"

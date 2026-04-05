@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"

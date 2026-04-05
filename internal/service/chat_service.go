@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/schema"
+	"go.uber.org/zap"
 )
 
 type ChatSource struct {
@@ -23,17 +24,22 @@ type ChatSource struct {
 }
 
 type ChatReply struct {
-	Session *models.ChatSession
-	Message *models.ChatMessage
-	Sources []ChatSource
+	Session                *models.ChatSession
+	Message                *models.ChatMessage
+	Sources                []ChatSource
+	RecommendedQuestions   []string        `json:"recommended_questions,omitempty"`
+	Reflection             *ReflectionResult `json:"reflection,omitempty"`
 }
 
 type ChatService interface {
 	CreateSession(ctx context.Context, userID, title string) (*models.ChatSession, error)
 	ListSessions(ctx context.Context, userID string) ([]models.ChatSession, error)
 	ListMessages(ctx context.Context, userID, sessionID string) ([]models.ChatMessage, error)
-	SendMessage(ctx context.Context, userID, sessionID, question string) (*ChatReply, error)
-	Search(ctx context.Context, userID, query string, topK int) ([]ChatSource, error)
+	SendMessage(ctx context.Context, userID, sessionID, question string, documentIDs []string) (*ChatReply, error)
+	Search(ctx context.Context, userID, query string, topK int, documentIDs []string) ([]ChatSource, error)
+	StreamSendMessage(ctx context.Context, opts StreamChatOptions) error
+	GenerateRecommendedQuestions(ctx context.Context, userID, sessionID string) ([]string, error)
+	GenerateReflection(ctx context.Context, userID, sessionID, messageID string) (*ReflectionResult, error)
 }
 
 type chatService struct {
@@ -89,7 +95,7 @@ func (s *chatService) ListMessages(ctx context.Context, userID, sessionID string
 	return messages, nil
 }
 
-func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, question string) (*ChatReply, error) {
+func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, question string, documentIDs []string) (*ChatReply, error) {
 	session, err := s.chatRepo.GetSession(ctx, userID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load session: %w", err)
@@ -101,7 +107,8 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, questi
 	}
 
 	retrievedDocs, err := s.llmService.RetrieveContext(ctx, question, s.retrievalTopK, RetrievalOptions{
-		UserID: userID,
+		UserID:      userID,
+		DocumentIDs: documentIDs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("retrieve source documents: %w", err)
@@ -165,9 +172,10 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, questi
 	}, nil
 }
 
-func (s *chatService) Search(ctx context.Context, userID, query string, topK int) ([]ChatSource, error) {
+func (s *chatService) Search(ctx context.Context, userID, query string, topK int, documentIDs []string) ([]ChatSource, error) {
 	docs, err := s.llmService.RetrieveContext(ctx, query, topK, RetrievalOptions{
-		UserID: userID,
+		UserID:      userID,
+		DocumentIDs: documentIDs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("search context: %w", err)
@@ -261,4 +269,236 @@ func buildSessionTitle(question string) string {
 		return "New conversation"
 	}
 	return title
+}
+
+// StreamSendMessage performs RAG-based chat with SSE streaming response
+func (s *chatService) StreamSendMessage(ctx context.Context, opts StreamChatOptions) error {
+	// Step 1: Load session
+	session, err := s.chatRepo.GetSession(ctx, opts.UserID, opts.SessionID)
+	if err != nil {
+		if opts.OnError != nil {
+			opts.OnError(fmt.Errorf("load session: %w", err))
+		}
+		return fmt.Errorf("load session: %w", err)
+	}
+
+	// Step 2: Get conversation history
+	history, err := s.chatRepo.ListSessionMessages(ctx, opts.UserID, opts.SessionID, s.historyLimit)
+	if err != nil {
+		if opts.OnError != nil {
+			opts.OnError(fmt.Errorf("load history: %w", err))
+		}
+		return fmt.Errorf("load history: %w", err)
+	}
+
+	// Step 3: Retrieve relevant chunks
+	retrievedDocs, err := s.llmService.RetrieveContext(ctx, opts.Question, s.retrievalTopK, RetrievalOptions{
+		UserID:      opts.UserID,
+		DocumentIDs: opts.DocumentIDs,
+	})
+	if err != nil {
+		if opts.OnError != nil {
+			opts.OnError(fmt.Errorf("retrieve source documents: %w", err))
+		}
+		return fmt.Errorf("retrieve source documents: %w", err)
+	}
+
+	sources := documentsToSources(retrievedDocs)
+	prompt := buildPrompt(history, sources, opts.Question)
+	promptTokens := estimateTokens(prompt)
+
+	// Step 4: Send sources event first
+	if opts.OnSource != nil {
+		if !opts.OnSource(sources, promptTokens) {
+			return fmt.Errorf("client disconnected")
+		}
+	}
+
+	// Step 5: Generate response
+	answer, err := s.llmService.GenerateAnswer(ctx, prompt)
+	if err != nil {
+		if opts.OnError != nil {
+			opts.OnError(fmt.Errorf("generate answer: %w", err))
+		}
+		return fmt.Errorf("generate answer: %w", err)
+	}
+
+	// Step 6: Stream response tokens (chunk size ~20 chars for natural feel)
+	messageID := uuid.NewString()
+	content := answer.Text
+	chunkSize := 20
+	for i := 0; i < len(content); i += chunkSize {
+		end := i + chunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		token := content[i:end]
+
+		if opts.OnToken != nil {
+			if !opts.OnToken(token) {
+				return fmt.Errorf("client disconnected")
+			}
+		}
+	}
+
+	// Step 7: Send done event
+	if opts.OnDone != nil {
+		opts.OnDone(content, promptTokens, answer.CompletionTokens, answer.TotalTokens)
+	}
+
+	// Step 8: Save messages to database
+	now := time.Now()
+	userMessage := &models.ChatMessage{
+		ID:        uuid.NewString(),
+		SessionID: opts.SessionID,
+		UserID:    opts.UserID,
+		Role:      "user",
+		Content:   opts.Question,
+		CreatedAt: now,
+	}
+	if err := s.chatRepo.SaveMessage(ctx, userMessage); err != nil {
+		zap.L().Error("save user message failed", zap.Error(err))
+	}
+
+	sourcesJSON, _ := json.Marshal(sources)
+	assistantMessage := &models.ChatMessage{
+		ID:               messageID,
+		SessionID:        opts.SessionID,
+		UserID:           opts.UserID,
+		Role:             "assistant",
+		Content:          content,
+		SourcesJSON:      string(sourcesJSON),
+		PromptTokens:     answer.PromptTokens,
+		CompletionTokens: answer.CompletionTokens,
+		TotalTokens:      answer.TotalTokens,
+		CreatedAt:        now,
+	}
+	if err := s.chatRepo.SaveMessage(ctx, assistantMessage); err != nil {
+		zap.L().Error("save assistant message failed", zap.Error(err))
+	}
+
+	// Update session activity
+	title := session.Title
+	if title == "" || title == "New conversation" {
+		title = buildSessionTitle(opts.Question)
+	}
+	_ = s.chatRepo.UpdateSessionActivity(ctx, opts.UserID, opts.SessionID, title, now)
+
+	return nil
+}
+
+// GenerateRecommendedQuestions generates suggested follow-up questions based on the conversation context
+func (s *chatService) GenerateRecommendedQuestions(ctx context.Context, userID, sessionID string) ([]string, error) {
+	// Load session and messages
+	_, err := s.chatRepo.GetSession(ctx, userID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("load session: %w", err)
+	}
+
+	messages, err := s.chatRepo.ListSessionMessages(ctx, userID, sessionID, 10)
+	if err != nil {
+		return nil, fmt.Errorf("load messages: %w", err)
+	}
+
+	// Build context from recent messages
+	var contextBuilder strings.Builder
+	for _, msg := range messages {
+		if msg.Role == "user" {
+			contextBuilder.WriteString(fmt.Sprintf("User: %s\n", msg.Content))
+		} else if msg.Role == "assistant" {
+			contextBuilder.WriteString(fmt.Sprintf("Assistant: %s\n", msg.Content))
+		}
+	}
+
+	// Retrieve relevant context
+	latestQuestion := ""
+	if len(messages) > 0 {
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role == "user" {
+				latestQuestion = messages[i].Content
+				break
+			}
+		}
+	}
+
+	docs, err := s.llmService.RetrieveContext(ctx, latestQuestion, s.retrievalTopK, RetrievalOptions{
+		UserID: userID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retrieve context: %w", err)
+	}
+
+	sources := documentsToSources(docs)
+
+	// Build context string for question generation
+	contextBuilder.WriteString("\nRetrieved context:\n")
+	for _, src := range sources {
+		contextBuilder.WriteString(fmt.Sprintf("- [%s] %s\n", src.FileName, src.Content))
+	}
+
+	// Generate recommended questions
+	questions, err := s.llmService.GenerateRecommendedQuestions(ctx, contextBuilder.String(), 3)
+	if err != nil {
+		zap.L().Warn("failed to generate recommended questions", zap.Error(err))
+		// Return default questions as fallback
+		return []string{
+			"Can you summarize the key points?",
+			"What are the main conclusions?",
+			"Can you explain this in more detail?",
+		}, nil
+	}
+
+	return questions, nil
+}
+
+// GenerateReflection analyzes a specific message and provides feedback
+func (s *chatService) GenerateReflection(ctx context.Context, userID, sessionID, messageID string) (*ReflectionResult, error) {
+	// Load messages
+	messages, err := s.chatRepo.ListSessionMessages(ctx, userID, sessionID, 20)
+	if err != nil {
+		return nil, fmt.Errorf("load messages: %w", err)
+	}
+
+	// Find the target message
+	var targetMsg *models.ChatMessage
+	var question string
+	for i, msg := range messages {
+		if msg.ID == messageID {
+			targetMsg = &messages[i]
+			break
+		}
+		// The question before this answer
+		if msg.Role == "user" && i+1 < len(messages) && messages[i+1].Role == "assistant" && messages[i+1].ID == messageID {
+			question = msg.Content
+			targetMsg = &messages[i+1]
+			break
+		}
+	}
+
+	if targetMsg == nil {
+		return nil, fmt.Errorf("message not found")
+	}
+
+	if targetMsg.Role != "assistant" {
+		return nil, fmt.Errorf("target message must be an assistant response")
+	}
+
+	// Parse sources
+	var sources []ChatSource
+	if targetMsg.SourcesJSON != "" {
+		json.Unmarshal([]byte(targetMsg.SourcesJSON), &sources)
+	}
+
+	sourceStrings := make([]string, 0, len(sources))
+	for _, src := range sources {
+		sourceStrings = append(sourceStrings, fmt.Sprintf("[%s] %s", src.FileName, src.Content))
+	}
+
+	// Generate reflection
+	reflection, err := s.llmService.GenerateReflection(ctx, question, targetMsg.Content, sourceStrings)
+	if err != nil {
+		return nil, fmt.Errorf("generate reflection: %w", err)
+	}
+
+	return reflection, nil
 }

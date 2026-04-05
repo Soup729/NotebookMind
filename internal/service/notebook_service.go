@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/embeddings"
 	"github.com/tmc/langchaingo/llms"
@@ -391,9 +391,9 @@ func (s *notebookService) failGuide(ctx context.Context, documentID string, err 
 func NewNotebookLLMService(ctx context.Context, cfg *configs.LLMConfig) (embeddings.Embedder, llms.Model, error) {
 	// Create embedding client
 	embeddingClient, err := openai.New(
-		openai.WithToken(cfg.OpenAI.APIKey),
-		openai.WithBaseURL(cfg.OpenAI.BaseURL),
-		openai.WithEmbeddingModel(cfg.OpenAI.EmbeddingModel),
+		openai.WithToken(cfg.Providers.OpenAI.APIKey),
+		openai.WithBaseURL(cfg.Providers.OpenAI.BaseURL),
+		openai.WithEmbeddingModel(cfg.Providers.OpenAI.EmbeddingModel),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create embedding client: %w", err)
@@ -405,9 +405,9 @@ func NewNotebookLLMService(ctx context.Context, cfg *configs.LLMConfig) (embeddi
 
 	// Create chat LLM client
 	chatClient, err := openai.New(
-		openai.WithToken(cfg.OpenAI.APIKey),
-		openai.WithBaseURL(cfg.OpenAI.BaseURL),
-		openai.WithModel(cfg.OpenAI.ChatModel),
+		openai.WithToken(cfg.Providers.OpenAI.APIKey),
+		openai.WithBaseURL(cfg.Providers.OpenAI.BaseURL),
+		openai.WithModel(cfg.Providers.OpenAI.ChatModel),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create chat client: %w", err)

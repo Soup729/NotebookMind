@@ -3,7 +3,7 @@ package logger
 import (
 	"os"
 
-	"enterprise-pdf-ai/internal/configs"
+	"NotebookAI/internal/configs"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"enterprise-pdf-ai/internal/models"
+	"NotebookAI/internal/models"
 
 	"gorm.io/gorm"
 )

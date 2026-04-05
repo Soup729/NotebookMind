@@ -3,8 +3,8 @@ package handlers
 import (
 	"net/http"
 
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/service"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/service"
 
 	"github.com/gin-gonic/gin"
 )

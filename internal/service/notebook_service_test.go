@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/models"
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/models"
+	"NotebookAI/internal/repository"
 )
 
 // ErrNotFound is a mock error for testing

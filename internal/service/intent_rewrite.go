@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"enterprise-pdf-ai/internal/repository"
+	"NotebookAI/internal/repository"
 )
 
 // ============ 查询意图重写服务 ============

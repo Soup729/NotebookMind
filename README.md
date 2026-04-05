@@ -1,6 +1,6 @@
 # Enterprise PDF AI
 
-企业级多文档智能问答平台，支持 PDF 解析、混合检索、意图识别和 Map-Reduce 并发总结。
+企业级多文档智能问答平台，支持 PDF 解析、混合检索、意图识别、SSE 流式响应、视觉问答 (VQA) 和 AI 反思。
 
 ## 目录结构
 
@@ -11,9 +11,9 @@ enterprise-pdf-ai/
 │   └── worker/           # 异步 Worker 入口
 ├── internal/
 │   ├── api/
-│   │   ├── handlers/     # HTTP 处理器 (Auth, Document, Chat, Search, Note, Dashboard)
-│   │   ├── middleware/    # JWT 认证、日志、限流、CORS
-│   │   └── router/        # Gin 路由配置
+│   │   ├── handlers/     # HTTP 处理器 (Auth, Document, Chat, Search, Note, Dashboard, VQA)
+│   │   ├── middleware/   # JWT 认证、日志、限流、CORS
+│   │   └── router/       # Gin 路由配置
 │   ├── app/              # 依赖注入容器
 │   ├── models/           # 数据模型 (User, Document, ChatSession, Note 等)
 │   ├── repository/       # 数据访问层 (PostgreSQL, Redis, Milvus)
@@ -21,8 +21,8 @@ enterprise-pdf-ai/
 │   └── worker/           # Asynq 异步任务处理器
 ├── configs/              # 配置文件
 ├── api/openapi.yaml      # OpenAPI 规范
-├── enterprise-pdf-web/   # Next.js 16 前端 (暂未合并)
-├── scripts/              # 脚本工具
+├── enterprise-pdf-web/   # Next.js 16 前端
+├── scripts/              # 脚本工具 (test_notebook.ps1)
 ├── docker-compose.yaml   # PostgreSQL + Redis
 └── .env.example          # 环境变量模板
 ```
@@ -41,10 +41,17 @@ enterprise-pdf-ai/
 - **查询改写**：结合历史会话提取上下文术语
 
 ### 3. 智能体工作流
+- **SSE 流式问答**：实时流式输出，支持 8 种事件类型
 - **Map-Reduce 并发**：Goroutines 并发总结多文档
 - **研究笔记**：创建/更新/删除/钉住/标签管理/按标签搜索
+- **AI 反思**：对回答进行准确性、完整性、来源覆盖度分析
 
-### 4. 企业安全
+### 4. 视觉问答 (VQA)
+- **图片上传问答**：上传图片进行问答
+- **图片 URL 问答**：通过 URL 获取图片进行问答
+- **图文增强问答**：结合文档上下文和图片进行问答
+
+### 5. 企业安全
 - **多租户隔离**：Milvus Partition Key 逻辑隔离
 - **租户服务**：`TenantIsolation` 接口设计
 
@@ -56,7 +63,7 @@ enterprise-pdf-ai/
 | 数据库 | PostgreSQL + Redis |
 | 向量库 | Milvus / Zilliz Cloud |
 | 异步任务 | Asynq |
-| 前端 | Next.js 16 (暂未合并) |
+| 前端 | Next.js 16 |
 | AI | OpenAI GPT-4o-mini |
 
 ## 快速开始
@@ -127,6 +134,16 @@ go run ./cmd/api
 | POST | /api/v1/chat/sessions | 创建会话 |
 | GET | /api/v1/chat/sessions/:id/messages | 消息历史 |
 | POST | /api/v1/chat/sessions/:id/messages | 发送消息 |
+| POST | /api/v1/chat/sessions/:id/stream | SSE 流式问答 |
+| POST | /api/v1/chat/sessions/:id/recommendations | 获取推荐问题 |
+| POST | /api/v1/chat/sessions/:id/messages/:messageId/reflection | AI 反思 |
+
+### VQA 视觉问答
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /api/v1/vqa/image | 图片上传问答 |
+| POST | /api/v1/vqa/image-url | 图片 URL 问答 |
+| POST | /api/v1/vqa/image-context | 图文增强问答 |
 
 ### 搜索
 | 方法 | 路径 | 说明 |
@@ -153,6 +170,17 @@ go run ./cmd/api
 
 ## 测试
 
+### 功能测试
+
+```powershell
+# 启动 API 服务后，运行测试脚本
+.\scripts\test_notebook.ps1 -ApiBase "http://localhost:8080/api/v1"
+```
+
+测试覆盖：认证、文档管理、聊天会话、SSE 流式问答、推荐问题、AI 反思、VQA 视觉问答、语义搜索、笔记管理。
+
+### 单元测试
+
 ```powershell
 go test ./internal/api/handlers
 go test ./internal/service
@@ -168,8 +196,30 @@ go test ./internal/worker
 
 ### 前端
 
-`enterprise-pdf-web/` 目录为 Next.js 前端，当前暂未合并到主干。如需开发前端，请单独切换到前端分支。
+`enterprise-pdf-web/` 目录为 Next.js 前端，使用 App Router 和 TypeScript。
 
 ### 数据库迁移
 
 PostgreSQL 表结构由 GORM AutoMigrate 自动管理，首次启动时会自动创建表。
+
+## Git 工作流
+
+### 合并到 main
+
+```bash
+# 1. 确保所有测试通过
+.\scripts\test_notebook.ps1 -ApiBase "http://localhost:8080/api/v1"
+
+# 2. 提交当前分支的更改
+git add .
+git commit -m "feat: 实现 SSE 流式问答、推荐问题、AI 反思、VQA 视觉问答"
+
+# 3. 切换到 main 分支
+git checkout main
+
+# 4. 合并功能分支
+git merge <分支名>
+
+# 5. 推送 main 分支
+git push origin main
+```

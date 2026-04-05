@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"enterprise-pdf-ai/internal/api/handlers"
-	"enterprise-pdf-ai/internal/configs"
-	"enterprise-pdf-ai/internal/platform/database"
-	"enterprise-pdf-ai/internal/repository"
-	"enterprise-pdf-ai/internal/service"
-	"enterprise-pdf-ai/internal/worker"
+	"NotebookAI/internal/api/handlers"
+	"NotebookAI/internal/configs"
+	"NotebookAI/internal/platform/database"
+	"NotebookAI/internal/repository"
+	"NotebookAI/internal/service"
+	"NotebookAI/internal/worker"
 )
 
 type Container struct {
@@ -28,6 +28,9 @@ type Container struct {
 	// Notes
 	NoteService   service.NoteService
 	NoteRepository repository.NoteRepository
+
+	// VQA
+	VQAHandler *handlers.VQAHandler
 
 	AuthHandler      *handlers.AuthHandler
 	DocumentHandler  *handlers.DocumentHandler
@@ -101,6 +104,7 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 	usageHandler := handlers.NewUsageHandler(dashboardService)
 	notebookHandler := handlers.NewNotebookHandler(notebookService, notebookChatService, embedder)
 	noteHandler := handlers.NewNoteHandler(noteService)
+	vqaHandler := handlers.NewVQAHandler(llmService)
 
 	return &Container{
 		LLMService:           llmService,
@@ -114,6 +118,7 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 		NotebookRepository:  notebookRepo,
 		NoteService:         noteService,
 		NoteRepository:      noteRepo,
+		VQAHandler:          vqaHandler,
 		AuthHandler:         authHandler,
 		DocumentHandler:     documentHandler,
 		ChatHandler:         chatHandler,
