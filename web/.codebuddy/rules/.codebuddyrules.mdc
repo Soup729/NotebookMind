@@ -1,0 +1,14 @@
+---
+description: 
+alwaysApply: true
+enabled: true
+updatedAt: 2026-04-08T12:18:55.695Z
+provider: 
+---
+
+# Front-End AI Developer Rules
+1. Tech Stack: Next.js 14 (App Router), React 18, TypeScript, Tailwind CSS, Shadcn UI, Zustand, SWR.
+2. TypeScript: STRICT mode. NO `any` types. All API requests must have defined Request/Response interfaces.
+3. Styling: Use Tailwind utility classes. Do NOT write custom CSS unless absolutely necessary (like PDF highlighting layers).
+4. Code Generation: DO NOT output truncated code with `// ... existing code`. Always output complete files or precise unified diffs.
+5. Base URL: All API calls must point to `http://localhost:8080/api/v1` and include `Authorization: Bearer ${token}`.

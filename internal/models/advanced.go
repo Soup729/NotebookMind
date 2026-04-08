@@ -87,7 +87,7 @@ type NoteResponse struct {
 	Type       string            `json:"type"`
 	IsPinned   bool              `json:"is_pinned"`
 	Tags       []string          `json:"tags"`
-	Metadata   map[string]string `json:"metadata"`
+	Metadata   map[string]any    `json:"metadata"`
 	CreatedAt  time.Time         `json:"created_at"`
 	UpdatedAt  time.Time         `json:"updated_at"`
 }
@@ -120,11 +120,11 @@ func parseNoteTags(tagsJSON string) []string {
 }
 
 // parseNoteMetadata 解析笔记元数据
-func parseNoteMetadata(metadataJSON string) map[string]string {
+func parseNoteMetadata(metadataJSON string) map[string]any {
 	if metadataJSON == "" {
 		return nil
 	}
-	var metadata map[string]string
+	var metadata map[string]any
 	json.Unmarshal([]byte(metadataJSON), &metadata)
 	return metadata
 }

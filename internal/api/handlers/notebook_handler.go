@@ -369,6 +369,35 @@ func (h *NotebookHandler) ListSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
+// DeleteSession deletes a chat session from a notebook
+func (h *NotebookHandler) DeleteSession(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	notebookID := c.Param("id")
+	sessionID := c.Param("sessionId")
+
+	// Verify notebook access
+	if _, err := h.notebookService.GetNotebook(c.Request.Context(), userID, notebookID); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "notebook not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify notebook"})
+		return
+	}
+
+	if err := h.chatService.DeleteSession(c.Request.Context(), userID, sessionID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 // StreamChat performs streaming chat with SSE
 func (h *NotebookHandler) StreamChat(c *gin.Context) {
 	userID, ok := getUserID(c)
@@ -385,14 +414,31 @@ func (h *NotebookHandler) StreamChat(c *gin.Context) {
 		return
 	}
 
+	// 预检查：先验证会话是否存在，如果不存在立即返回明确错误而非 SSE 流中的隐式错误
+	// 这样前端可以在发送前就知道会话已失效，避免长时间等待后才收到错误
+	session, sessionErr := h.chatService.GetSession(c.Request.Context(), userID, sessionID)
+	if sessionErr != nil {
+		if errors.Is(sessionErr, repository.ErrNotFound) {
+			c.JSON(http.StatusGone, gin.H{
+				"error":  "session not found or expired",
+				"code":   "SESSION_GONE",
+				"hint":   "该对话已被删除或不存在，请创建新对话",
+				"sessionId": sessionID,
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load session"})
+		return
+	}
+
 	// Set SSE headers
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	c.Header("Transfer-Encoding", "chunked")
 
-	// Stream response
-	err := h.chatService.StreamChat(c.Request.Context(), userID, sessionID, req.Question, func(reply *service.NotebookChatReply) bool {
+	// Stream response — 传入预加载的 session 对象避免重复查询
+	err := h.chatService.StreamChatWithSession(c.Request.Context(), userID, session, req.Question, func(reply *service.NotebookChatReply) bool {
 		data, _ := json.Marshal(reply)
 		_, err := c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", data))
 		if err != nil {
@@ -403,9 +449,10 @@ func (h *NotebookHandler) StreamChat(c *gin.Context) {
 	})
 
 	if err != nil {
-		zap.L().Error("stream chat failed", zap.Error(err))
-		// Send error event
-		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", `{"error":"streaming failed"}`))
+		zap.L().Error("stream chat failed", zap.String("session_id", sessionID), zap.String("user_id", userID), zap.Error(err))
+		// Send error event via SSE
+		errData, _ := json.Marshal(gin.H{"error": "streaming failed", "detail": err.Error()})
+		c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", errData))
 		c.Writer.Flush()
 		return
 	}

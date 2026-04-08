@@ -28,7 +28,7 @@ type CreateNoteRequest struct {
 	Type       string            `json:"type"`
 	IsPinned   bool              `json:"is_pinned"`
 	Tags       []string          `json:"tags"`
-	Metadata   map[string]string `json:"metadata"`
+	Metadata   map[string]any    `json:"metadata"`
 }
 
 // UpdateNoteRequest 更新笔记请求

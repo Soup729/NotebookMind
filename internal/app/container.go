@@ -97,7 +97,7 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 	producer := worker.NewTaskProducer(&cfg.Cache.Redis)
 
 	authHandler := handlers.NewAuthHandler(authService)
-	documentHandler := handlers.NewDocumentHandler(producer, documentService, cfg.Upload)
+	documentHandler := handlers.NewDocumentHandler(producer, documentService, notebookService, cfg.Upload)
 	chatHandler := handlers.NewChatHandler(chatService)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 	searchHandler := handlers.NewSearchHandler(chatService)

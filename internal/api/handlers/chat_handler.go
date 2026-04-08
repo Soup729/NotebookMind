@@ -140,6 +140,7 @@ func chatMessageResponse(message models.ChatMessage) gin.H {
 
 	return gin.H{
 		"id":                message.ID,
+		"session_id":        message.SessionID,
 		"role":              message.Role,
 		"content":           message.Content,
 		"prompt_tokens":     message.PromptTokens,

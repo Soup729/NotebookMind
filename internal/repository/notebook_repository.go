@@ -185,13 +185,41 @@ func (r *notebookRepository) ListDocuments(ctx context.Context, notebookID strin
 
 func (r *notebookRepository) GetDocumentIDs(ctx context.Context, notebookID string) ([]string, error) {
 	var docIDs []string
+
+	// 从 notebook_documents 关联表获取
 	if err := r.db.WithContext(ctx).
 		Model(&models.NotebookDocument{}).
 		Where("notebook_id = ?", notebookID).
 		Pluck("document_id", &docIDs).Error; err != nil {
-		return nil, fmt.Errorf("get notebook document ids: %w", err)
+		return nil, fmt.Errorf("get notebook document ids from junction: %w", err)
 	}
-	return docIDs, nil
+
+	// 同时从 documents 表获取直接关联到 notebook 的文档（备用方案）
+	var directDocIDs []string
+	if err := r.db.WithContext(ctx).
+		Model(&models.Document{}).
+		Where("notebook_id = ? AND notebook_id != ''", notebookID).
+		Pluck("id", &directDocIDs).Error; err != nil {
+		return nil, fmt.Errorf("get notebook document ids from documents: %w", err)
+	}
+
+	// 合并两个来源的文档ID（去重）
+	seen := make(map[string]bool)
+	allIDs := make([]string, 0, len(docIDs)+len(directDocIDs))
+	for _, id := range docIDs {
+		if !seen[id] {
+			seen[id] = true
+			allIDs = append(allIDs, id)
+		}
+	}
+	for _, id := range directDocIDs {
+		if !seen[id] {
+			seen[id] = true
+			allIDs = append(allIDs, id)
+		}
+	}
+
+	return allIDs, nil
 }
 
 func (r *notebookRepository) UpsertGuide(ctx context.Context, guide *models.DocumentGuide) error {

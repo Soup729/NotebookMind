@@ -41,7 +41,7 @@ func main() {
 	}
 	defer container.TaskProducer.Close()
 
-	processor := worker.NewDocumentProcessor(container.LLMService, container.DocumentRepository)
+	processor := worker.NewDocumentProcessor(container.LLMService, container.DocumentRepository, container.NotebookService)
 	mux := asynq.NewServeMux()
 	processor.RegisterHandlers(mux)
 

@@ -40,9 +40,13 @@ type NotebookChatService interface {
 	// Session management
 	CreateSession(ctx context.Context, userID, notebookID, title string) (*models.ChatSession, error)
 	ListSessions(ctx context.Context, userID, notebookID string) ([]models.ChatSession, error)
+	DeleteSession(ctx context.Context, userID, sessionID string) error
+	GetSession(ctx context.Context, userID, sessionID string) (*models.ChatSession, error)
 
 	// Streaming chat
 	StreamChat(ctx context.Context, userID, sessionID, question string, send func(reply *NotebookChatReply) bool) error
+	// StreamChatWithSession 接受预加载的 session 对象，避免重复查询数据库
+	StreamChatWithSession(ctx context.Context, userID string, session *models.ChatSession, question string, send func(reply *NotebookChatReply) bool) error
 
 	// Search within notebook
 	SearchNotebook(ctx context.Context, userID, notebookID, query string, topK int) ([]NotebookChatSource, error)
@@ -108,6 +112,30 @@ func (s *notebookChatService) ListSessions(ctx context.Context, userID, notebook
 	return sessions, nil
 }
 
+func (s *notebookChatService) DeleteSession(ctx context.Context, userID, sessionID string) error {
+	// Get session to verify ownership
+	session, err := s.chatRepo.GetSession(ctx, userID, sessionID)
+	if err != nil {
+		return err
+	}
+
+	// Delete all messages in the session first (cascade)
+	if delErr := s.chatRepo.DeleteMessagesBySession(ctx, session.ID); delErr != nil {
+		zap.L().Error("failed to delete session messages", zap.Error(delErr), zap.String("sessionID", session.ID))
+	}
+
+	// Delete the session itself
+	if err := s.chatRepo.DeleteSession(ctx, session.ID); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+// GetSession 获取单个会话（供预检查使用）
+func (s *notebookChatService) GetSession(ctx context.Context, userID, sessionID string) (*models.ChatSession, error) {
+	return s.chatRepo.GetSession(ctx, userID, sessionID)
+}
+
 // StreamChat performs RAG-based chat with SSE streaming response
 func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID, question string, send func(reply *NotebookChatReply) bool) error {
 	// Step 1: Load session
@@ -141,13 +169,27 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 	}
 
 	// Step 5: Build sources with document names
+	// 优化：批量获取文档名，避免 N+1 查询问题（原代码对每个 chunk 单独查一次数据库）
 	sources := make([]NotebookChatSource, 0, len(chunks))
+
+	// 收集所有唯一的 DocumentID
+	docIDSet := make(map[string]struct{}, len(chunks))
+	for _, chunk := range chunks {
+		docIDSet[chunk.DocumentID] = struct{}{}
+	}
+	uniqueDocIDs := make([]string, 0, len(docIDSet))
+	for id := range docIDSet {
+		uniqueDocIDs = append(uniqueDocIDs, id)
+	}
+
+	// 批量查询所有文档名（单次 DB 查询）
+	docNameMap := s.docRepo.GetNamesByIDs(ctx, userID, uniqueDocIDs)
+
+	// 构建 sources 列表
 	for i, chunk := range chunks {
-		// Get document name from repository
-		doc, _ := s.docRepo.GetByID(ctx, userID, chunk.DocumentID)
-		docName := "Unknown Document"
-		if doc != nil {
-			docName = doc.FileName
+		docName := docNameMap[chunk.DocumentID]
+		if docName == "" {
+			docName = "Unknown Document"
 		}
 
 		sources = append(sources, NotebookChatSource{
@@ -164,10 +206,24 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 	// Step 6: Build prompt with strict format
 	prompt := s.buildPrompt(history, sources, question)
 
-	// Step 7: Stream LLM response
+	// Step 7: Save user message FIRST (before LLM call) — 确保历史记录完整，即使后续AI回答失败也能保留问题
 	messageID := uuid.NewString()
+	now := time.Now()
+	userMessage := &models.ChatMessage{
+		ID:        uuid.NewString(),
+		SessionID: sessionID,
+		UserID:    userID,
+		Role:      "user",
+		Content:   question,
+		CreatedAt: now,
+	}
+	if err := s.chatRepo.SaveMessage(ctx, userMessage); err != nil {
+		zap.L().Error("save user message failed", zap.Error(err), zap.String("session_id", sessionID))
+		// 不返回错误 — 继续尝试生成回答
+	}
 
-	// Initial response with sources
+	// Step 8: Generate LLM response
+	// Initial response with sources (通知客户端已开始处理)
 	initialReply := &NotebookChatReply{
 		SessionID:    session.ID,
 		MessageID:    messageID,
@@ -179,7 +235,6 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 		return fmt.Errorf("client disconnected")
 	}
 
-	// Generate response (non-streaming for simplicity, can be extended with streaming)
 	response, err := llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
 	if err != nil {
 		return fmt.Errorf("generate response: %w", err)
@@ -197,20 +252,7 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 		return fmt.Errorf("client disconnected")
 	}
 
-	// Step 8: Save messages to database
-	now := time.Now()
-	userMessage := &models.ChatMessage{
-		ID:        uuid.NewString(),
-		SessionID: sessionID,
-		UserID:    userID,
-		Role:      "user",
-		Content:   question,
-		CreatedAt: now,
-	}
-	if err := s.chatRepo.SaveMessage(ctx, userMessage); err != nil {
-		zap.L().Error("save user message failed", zap.Error(err))
-	}
-
+	// Step 9: Save assistant message
 	sourcesJSON, _ := json.Marshal(sources)
 	assistantMessage := &models.ChatMessage{
 		ID:               messageID,
@@ -225,7 +267,137 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 		CreatedAt:        now,
 	}
 	if err := s.chatRepo.SaveMessage(ctx, assistantMessage); err != nil {
-		zap.L().Error("save assistant message failed", zap.Error(err))
+		zap.L().Error("save assistant message failed", zap.Error(err), zap.String("session_id", sessionID))
+	}
+
+	// Update session activity
+	title := session.Title
+	if title == "" || title == "New conversation" {
+		title = buildSessionTitle(question)
+	}
+	_ = s.chatRepo.UpdateSessionActivity(ctx, userID, sessionID, title, now)
+
+	return nil
+}
+
+// StreamChatWithSession 与 StreamChat 功能相同，但接受预加载的 session 对象，避免重复查询数据库
+func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID string, session *models.ChatSession, question string, send func(reply *NotebookChatReply) bool) error {
+	sessionID := session.ID
+
+	// Step 1: Get conversation history（session 已预加载，跳过）
+	history, err := s.chatRepo.ListSessionMessages(ctx, userID, sessionID, 10)
+	if err != nil {
+		return fmt.Errorf("load history: %w", err)
+	}
+
+	// Step 2: Get notebook and document IDs for scope
+	docIDs, err := s.notebookRepo.GetDocumentIDs(ctx, session.NotebookID)
+	if err != nil {
+		return fmt.Errorf("get notebook documents: %w", err)
+	}
+
+	// Step 3: Retrieve relevant chunks from Milvus
+	queryVector, err := s.embedder.EmbedQuery(ctx, question)
+	if err != nil {
+		return fmt.Errorf("embed query: %w", err)
+	}
+
+	chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
+	if err != nil {
+		return fmt.Errorf("search chunks: %w", err)
+	}
+
+	// Step 4: Build sources with batch document name lookup
+	sources := make([]NotebookChatSource, 0, len(chunks))
+
+	docIDSet := make(map[string]struct{}, len(chunks))
+	for _, chunk := range chunks {
+		docIDSet[chunk.DocumentID] = struct{}{}
+	}
+	uniqueDocIDs := make([]string, 0, len(docIDSet))
+	for id := range docIDSet {
+		uniqueDocIDs = append(uniqueDocIDs, id)
+	}
+	docNameMap := s.docRepo.GetNamesByIDs(ctx, userID, uniqueDocIDs)
+
+	for i, chunk := range chunks {
+		docName := docNameMap[chunk.DocumentID]
+		if docName == "" {
+			docName = "Unknown Document"
+		}
+		sources = append(sources, NotebookChatSource{
+			NotebookID:   chunk.NotebookID,
+			DocumentID:   chunk.DocumentID,
+			DocumentName: docName,
+			PageNumber:   chunk.PageNumber,
+			ChunkIndex:   chunk.ChunkIndex,
+			Content:      chunk.Content,
+			Score:        scores[i],
+		})
+	}
+
+	// Step 5: Build prompt
+	prompt := s.buildPrompt(history, sources, question)
+
+	// Step 6: Save user message FIRST (before LLM call) — 确保历史记录完整
+	messageID := uuid.NewString()
+	now := time.Now()
+	userMessage := &models.ChatMessage{
+		ID:        uuid.NewString(),
+		SessionID: sessionID,
+		UserID:    userID,
+		Role:      "user",
+		Content:   question,
+		CreatedAt: now,
+	}
+	if err := s.chatRepo.SaveMessage(ctx, userMessage); err != nil {
+		zap.L().Error("save user message failed", zap.Error(err), zap.String("session_id", sessionID))
+	}
+
+	// Step 7: Generate LLM response
+	initialReply := &NotebookChatReply{
+		SessionID:    session.ID,
+		MessageID:    messageID,
+		Content:      "",
+		Sources:      sources,
+		PromptTokens: estimateTokens(prompt),
+	}
+	if !send(initialReply) {
+		return fmt.Errorf("client disconnected")
+	}
+
+	response, err := llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
+	if err != nil {
+		return fmt.Errorf("generate response: %w", err)
+	}
+
+	finalReply := &NotebookChatReply{
+		SessionID:    session.ID,
+		MessageID:    messageID,
+		Content:      strings.TrimSpace(response),
+		Sources:      sources,
+		PromptTokens: estimateTokens(prompt),
+	}
+	if !send(finalReply) {
+		return fmt.Errorf("client disconnected")
+	}
+
+	// Step 8: Save assistant message
+	sourcesJSON, _ := json.Marshal(sources)
+	assistantMessage := &models.ChatMessage{
+		ID:               messageID,
+		SessionID:        sessionID,
+		UserID:           userID,
+		Role:             "assistant",
+		Content:          strings.TrimSpace(response),
+		SourcesJSON:      string(sourcesJSON),
+		PromptTokens:     estimateTokens(prompt),
+		CompletionTokens: estimateTokens(response),
+		TotalTokens:      estimateTokens(prompt) + estimateTokens(response),
+		CreatedAt:        now,
+	}
+	if err := s.chatRepo.SaveMessage(ctx, assistantMessage); err != nil {
+		zap.L().Error("save assistant message failed", zap.Error(err), zap.String("session_id", sessionID))
 	}
 
 	// Update session activity

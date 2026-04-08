@@ -275,6 +275,70 @@ Authorization: Bearer <token>
 
 ---
 
+### 11b. 删除聊天会话
+**DELETE** `/notebooks/:id/sessions/:sessionId`
+
+> 新增：删除指定笔记本中的某个聊天会话及其所有消息
+
+**响应：** `204 No Content`
+
+| 错误码 | 说明 |
+|--------|------|
+| 401 | 未认证 |
+| 404 | 笔记本或会话不存在 |
+
+---
+
+### 11c. 获取会话消息列表
+**GET** `/chat/sessions/:sessionId/messages`
+
+> 获取某个会话的所有历史消息，用于切换会话时加载对话记录
+
+**响应 (200 OK)：**
+```json
+{
+  "items": [
+    {
+      "id": "990e8400-e29b-41d4-a716-446655440005",
+      "session_id": "880e8400-e29b-41d4-a716-446655440003",
+      "role": "user",
+      "content": "报告中提到的营收增长的主要原因是什么？",
+      "sources": [],
+      "created_at": "2026-04-05T12:16:00Z"
+    },
+    {
+      "id": "a00e8400-e29b-41d4-a716-446655440007",
+      "session_id": "880e8400-e29b-41d4-a716-446655440003",
+      "role": "assistant",
+      "content": "根据年度报告，营收增长主要得益于...",
+      "sources": [
+        {
+          "document_id": "660e8400-e29b-41d4-a716-446655440001",
+          "document_name": "年度报告.pdf",
+          "page_number": 3,
+          "chunk_index": 12,
+          "content": "2024年公司营收达到100亿元，同比增长15%...",
+          "score": 0.85
+        }
+      ],
+      "created_at": "2026-04-05T12:17:00Z"
+    }
+  ]
+}
+```
+
+**消息字段说明：**
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| id | string | 消息UUID |
+| session_id | string | 所属会话ID |
+| role | string | 角色: `user` / `assistant` |
+| content | string | 消息内容（支持Markdown） |
+| sources | array | AI回复的引用来源（用户消息为空数组） |
+| created_at | string | 创建时间 (ISO 8601) |
+
+---
+
 ### 12. 流式问答 (SSE)
 **POST** `/notebooks/:id/sessions/:sessionId/chat`
 
@@ -500,5 +564,5 @@ FAQ:
 
 ---
 
-*文档版本: v1.0.0*
-*最后更新: 2026-04-05*
+*文档版本: v1.1.0*
+*最后更新: 2026-04-09*

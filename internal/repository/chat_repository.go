@@ -20,6 +20,8 @@ type ChatRepository interface {
 	CountMessages(ctx context.Context, userID string) (int64, error)
 	SumTokens(ctx context.Context, userID string) (int64, error)
 	DailyTokenUsage(ctx context.Context, userID string, days int) ([]DailyUsageRow, error)
+	DeleteSession(ctx context.Context, sessionID string) error
+	DeleteMessagesBySession(ctx context.Context, sessionID string) error
 }
 
 type DailyUsageRow struct {
@@ -53,11 +55,39 @@ func NewChatRepository(db *gorm.DB) (ChatRepository, error) {
 		}
 	}
 
+	// 修复 session_id 列类型：从 bigint 改为 varchar(36)，以支持 UUID
+	if err := fixChatMessageSessionIDType(db); err != nil {
+		return nil, fmt.Errorf("fix chat_message session_id type: %w", err)
+	}
+
 	if err := db.AutoMigrate(&models.ChatSession{}, &models.ChatMessage{}); err != nil {
 		return nil, fmt.Errorf("auto migrate chat tables: %w", err)
 	}
 
 	return &chatRepository{db: db}, nil
+}
+
+// fixChatMessageSessionIDType 将 chat_messages.session_id 从 bigint 改为 varchar(36)
+func fixChatMessageSessionIDType(db *gorm.DB) error {
+	// 检查当前列类型
+	var columnType string
+	row := db.Raw(`SELECT data_type FROM information_schema.columns
+		WHERE table_name = 'chat_messages' AND column_name = 'session_id'`).Row()
+	if row != nil {
+		_ = row.Scan(&columnType)
+	}
+
+	// 如果是 bigint 或 integer 等数值类型，则改为 varchar(36)
+	if columnType == "bigint" || columnType == "integer" || columnType == "smallint" || columnType == "bigserial" {
+		// 先删除外键约束（如果存在）
+		db.Exec(`ALTER TABLE "chat_messages" DROP CONSTRAINT IF EXISTS "fk_chat_messages_session"`)
+
+		// 修改列类型
+		if err := db.Exec(`ALTER TABLE "chat_messages" ALTER COLUMN "session_id" TYPE varchar(36)`).Error; err != nil {
+			return fmt.Errorf("alter session_id type: %w", err)
+		}
+	}
+	return nil
 }
 
 func isColumnExistsError(err error) bool {
@@ -195,4 +225,23 @@ func (r *chatRepository) DailyTokenUsage(ctx context.Context, userID string, day
 		return nil, fmt.Errorf("daily token usage: %w", err)
 	}
 	return rows, nil
+}
+
+func (r *chatRepository) DeleteSession(ctx context.Context, sessionID string) error {
+	result := r.db.WithContext(ctx).Delete(&models.ChatSession{}, "id = ?", sessionID)
+	if result.Error != nil {
+		return fmt.Errorf("delete session: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("session not found")
+	}
+	return nil
+}
+
+func (r *chatRepository) DeleteMessagesBySession(ctx context.Context, sessionID string) error {
+	result := r.db.WithContext(ctx).Delete(&models.ChatMessage{}, "session_id = ?", sessionID)
+	if result.Error != nil {
+		return fmt.Errorf("delete messages by session: %w", result.Error)
+	}
+	return nil
 }

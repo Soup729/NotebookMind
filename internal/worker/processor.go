@@ -21,14 +21,16 @@ import (
 )
 
 type DocumentProcessor struct {
-	llmService service.LLMService
-	documents  repository.DocumentRepository
+	llmService      service.LLMService
+	documents       repository.DocumentRepository
+	notebookService service.NotebookService
 }
 
-func NewDocumentProcessor(llmService service.LLMService, documents repository.DocumentRepository) *DocumentProcessor {
+func NewDocumentProcessor(llmService service.LLMService, documents repository.DocumentRepository, notebookService service.NotebookService) *DocumentProcessor {
 	return &DocumentProcessor{
-		llmService: llmService,
-		documents:  documents,
+		llmService:      llmService,
+		documents:       documents,
+		notebookService: notebookService,
 	}
 }
 
@@ -102,6 +104,30 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 
 	if err := p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusCompleted, len(docs), ""); err != nil {
 		return fmt.Errorf("update document status: %w", err)
+	}
+
+	// Generate document guide (summary, FAQ, key points)
+	// Get document to retrieve NotebookID
+	doc, err := p.documents.GetByIDForWorker(ctx, payload.DocumentID)
+	if err != nil {
+		zap.L().Warn("failed to get document for guide generation", zap.String("document_id", payload.DocumentID), zap.Error(err))
+	} else if doc.NotebookID != "" && p.notebookService != nil {
+		// Generate guide asynchronously - don't block on errors
+		go func() {
+			guideCtx := context.Background()
+			if err := p.notebookService.ProcessDocumentWithGuide(guideCtx, payload.UserID, doc.NotebookID, payload.DocumentID, content); err != nil {
+				zap.L().Error("failed to generate document guide",
+					zap.String("document_id", payload.DocumentID),
+					zap.String("notebook_id", doc.NotebookID),
+					zap.Error(err),
+				)
+			} else {
+				zap.L().Info("document guide generated successfully",
+					zap.String("document_id", payload.DocumentID),
+					zap.String("notebook_id", doc.NotebookID),
+				)
+			}
+		}()
 	}
 
 	zap.L().Info("document task processed",

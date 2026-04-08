@@ -85,6 +85,7 @@ func New(
 		// Notebook Chat Sessions
 		protected.GET("/notebooks/:id/sessions", notebookHandler.ListSessions)
 		protected.POST("/notebooks/:id/sessions", notebookHandler.CreateSession)
+		protected.DELETE("/notebooks/:id/sessions/:sessionId", notebookHandler.DeleteSession)
 
 		// Notebook Streaming Chat
 		protected.POST("/notebooks/:id/sessions/:sessionId/chat", notebookHandler.StreamChat)

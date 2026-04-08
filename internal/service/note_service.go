@@ -47,7 +47,7 @@ type CreateNoteRequest struct {
 	Type       string            `json:"type"` // ai_response, original_text, summary, custom
 	IsPinned   bool              `json:"is_pinned"`
 	Tags       []string          `json:"tags"`
-	Metadata   map[string]string `json:"metadata"`
+	Metadata   map[string]any    `json:"metadata"`
 }
 
 // UpdateNoteRequest 更新笔记请求
@@ -310,11 +310,11 @@ func ParseNoteTags(tagsJSON string) []string {
 }
 
 // ParseNoteMetadata 解析笔记元数据
-func ParseNoteMetadata(metadataJSON string) map[string]string {
+func ParseNoteMetadata(metadataJSON string) map[string]any {
 	if metadataJSON == "" {
 		return nil
 	}
-	var metadata map[string]string
+	var metadata map[string]any
 	json.Unmarshal([]byte(metadataJSON), &metadata)
 	return metadata
 }
@@ -329,7 +329,7 @@ type NoteResponse struct {
 	Type       string            `json:"type"`
 	IsPinned   bool              `json:"is_pinned"`
 	Tags       []string          `json:"tags"`
-	Metadata   map[string]string `json:"metadata"`
+	Metadata   map[string]any    `json:"metadata"`
 	CreatedAt  time.Time         `json:"created_at"`
 	UpdatedAt  time.Time         `json:"updated_at"`
 }

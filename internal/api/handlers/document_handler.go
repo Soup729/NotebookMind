@@ -23,13 +23,15 @@ import (
 type DocumentHandler struct {
 	producer        worker.TaskProducer
 	documentService service.DocumentService
+	notebookService service.NotebookService
 	uploadCfg       configs.UploadConfig
 }
 
-func NewDocumentHandler(producer worker.TaskProducer, documentService service.DocumentService, uploadCfg configs.UploadConfig) *DocumentHandler {
+func NewDocumentHandler(producer worker.TaskProducer, documentService service.DocumentService, notebookService service.NotebookService, uploadCfg configs.UploadConfig) *DocumentHandler {
 	return &DocumentHandler{
 		producer:        producer,
 		documentService: documentService,
+		notebookService: notebookService,
 		uploadCfg:       uploadCfg,
 	}
 }
@@ -59,6 +61,9 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 		return
 	}
 
+	// 获取可选的 notebook_id（用于直接上传到指定笔记本）
+	notebookID := c.PostForm("notebook_id")
+
 	if err := os.MkdirAll(h.uploadCfg.LocalDir, 0o755); err != nil {
 		zap.L().Error("create upload directory failed", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
@@ -66,7 +71,8 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 	}
 
 	documentID := uuid.NewString()
-	storedFileName := fmt.Sprintf("%s_%d%s", documentID, time.Now().UnixNano(), ext)
+	timestamp := time.Now().UnixMilli()
+	storedFileName := fmt.Sprintf("%s_%d%s", documentID, timestamp, ext)
 	storedPath := filepath.Join(h.uploadCfg.LocalDir, storedFileName)
 
 	if err := c.SaveUploadedFile(fileHeader, storedPath); err != nil {
@@ -82,11 +88,20 @@ func (h *DocumentHandler) UploadDocument(c *gin.Context) {
 		StoredPath: storedPath,
 		Status:     models.DocumentStatusProcessing,
 		FileSize:   fileHeader.Size,
+		NotebookID: notebookID, // 直接设置笔记本 ID
 	}
 	if err := h.documentService.Create(c.Request.Context(), document); err != nil {
 		zap.L().Error("persist document metadata failed", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist document"})
 		return
+	}
+
+	// 如果提供了 notebook_id，创建关联记录
+	if notebookID != "" {
+		if err := h.notebookService.AddDocumentToNotebook(c.Request.Context(), notebookID, documentID); err != nil {
+			zap.L().Error("add document to notebook failed", zap.Error(err))
+			// 不影响主流程，仅记录日志
+		}
 	}
 
 	taskPayload := tasks.ProcessDocumentPayload{

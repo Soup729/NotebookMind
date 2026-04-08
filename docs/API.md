@@ -100,6 +100,16 @@ GET /notes
 - `page`: 页码 (默认 1)
 - `page_size`: 每页数量 (默认 20)
 
+**响应 (200 OK)**:
+```json
+{
+  "items": [...],
+  "total_count": 100,
+  "page": 1,
+  "page_size": 20
+}
+```
+
 #### 钉住/取消钉住
 
 ```
@@ -309,6 +319,74 @@ GET /validate-access
   "tenant_id": "tenant-uuid"
 }
 ```
+
+---
+
+## 会话管理 (Sessions)
+
+### 聊天会话 CRUD
+
+#### 创建会话
+```
+POST /notebooks/:id/sessions
+```
+
+**请求体**:
+```json
+{ "title": "新对话" }
+```
+
+**响应 (201)**:
+```json
+{ "session": { "id": "...", "title": "新对话", ... } }
+```
+
+#### 列出会话
+```
+GET /notebooks/:id/sessions
+```
+
+**响应 (200)**:
+```json
+{ "items": [{ "id": "...", "title": "...", "last_message_at": "..." }] }
+```
+
+#### 删除会话
+```
+DELETE /notebooks/:id/sessions/:sessionId
+```
+> 级联删除会话及其所有消息
+
+**响应**: `204 No Content`
+
+### 会话消息
+
+#### 获取历史消息
+```
+GET /chat/sessions/:sessionId/messages
+```
+
+**响应 (200)**:
+```json
+{
+  "items": [
+    { "id": "...", "session_id": "...", "role": "user|assistant", "content": "...", "sources": [...], "created_at": "..." }
+  ]
+}
+```
+
+#### 流式问答 (SSE)
+```
+POST /notebooks/:id/sessions/:sessionId/chat
+```
+Content-Type: `application/json`
+
+**请求体**:
+```json
+{ "question": "问题内容", "document_ids": ["doc1", "doc2"] }
+```
+
+**响应**: `text/event-stream` (SSE格式，以 `[DONE]` 结尾)
 
 ---
 

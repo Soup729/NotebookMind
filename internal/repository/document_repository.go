@@ -13,6 +13,8 @@ type DocumentRepository interface {
 	Create(ctx context.Context, document *models.Document) error
 	GetByID(ctx context.Context, userID, documentID string) (*models.Document, error)
 	GetByIDForWorker(ctx context.Context, documentID string) (*models.Document, error)
+	// GetNamesByIDs 批量获取文档名称（用于减少 N+1 查询）
+	GetNamesByIDs(ctx context.Context, userID string, docIDs []string) map[string]string
 	ListByUser(ctx context.Context, userID string) ([]models.Document, error)
 	UpdateProcessingResult(ctx context.Context, documentID string, status string, chunkCount int, errorMessage string) error
 	DeleteByID(ctx context.Context, userID, documentID string) error
@@ -60,6 +62,30 @@ func (r *documentRepository) GetByIDForWorker(ctx context.Context, documentID st
 		return nil, fmt.Errorf("get document for worker: %w", err)
 	}
 	return &document, nil
+}
+
+// GetNamesByIDs 批量获取文档 ID -> 文件名的映射（单次 SQL 查询，解决 N+1 问题）
+func (r *documentRepository) GetNamesByIDs(ctx context.Context, userID string, docIDs []string) map[string]string {
+	if len(docIDs) == 0 {
+		return make(map[string]string)
+	}
+
+	var results []struct {
+		ID       string
+		FileName string
+	}
+
+	r.db.WithContext(ctx).
+		Model(&models.Document{}).
+		Where("user_id = ? AND id IN ?", userID, docIDs).
+		Select("id, file_name").
+		Find(&results)
+
+	nameMap := make(map[string]string, len(results))
+	for _, r := range results {
+		nameMap[r.ID] = r.FileName
+	}
+	return nameMap
 }
 
 func (r *documentRepository) ListByUser(ctx context.Context, userID string) ([]models.Document, error) {
