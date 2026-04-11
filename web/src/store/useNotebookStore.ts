@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - 笔记本状态管理 (Zustand)
+// NotebookMind - 笔记本状态管理 (Zustand)
 // ============================================================
 
 import { create } from 'zustand';
@@ -29,6 +29,7 @@ const initialState: NotebookState = {
   mainView: 'guide',
   activePdfId: null,
   highlightTarget: null,
+  selectedModel: null,
 
   // 操作方法 - 空实现，将在 store 内部绑定
   setNotebookAndSession: () => {},
@@ -38,6 +39,7 @@ const initialState: NotebookState = {
   setMainViewToPdf: () => {},
   setMainViewToGuide: () => {},
   clearHighlightTarget: () => {},
+  setSelectedModel: () => {},
 };
 
 export const useNotebookStore = create<NotebookStore>()(
@@ -122,12 +124,20 @@ export const useNotebookStore = create<NotebookStore>()(
         },
 
         // ============================================================
+        // 设置选中模型
+        // ============================================================
+        setSelectedModel: (modelId: string | null) => {
+          set({ selectedModel: modelId });
+        },
+
+        // ============================================================
         // 重置状态
         // ============================================================
         reset: () => {
           set({
             ...initialState,
             _hasHydrated: get()._hasHydrated,
+            selectedModel: null,
           });
         },
       }),

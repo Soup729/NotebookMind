@@ -1,4 +1,4 @@
-# Enterprise PDF AI - NotebookLM Core API Documentation
+# NotebookMind - NotebookLM Core API Documentation
 
 > 基于 Gin + GORM + Milvus SDK + go-openai 构建的类 Google NotebookLM 核心功能 API
 

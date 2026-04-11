@@ -1,4 +1,4 @@
-# Enterprise PDF AI - 前端 (Web)
+# NotebookMind - 前端 (Web)
 
 基于 **Next.js 16** 的企业级多文档智能问答平台前端，采用 App Router 架构，支持 SSE 流式对话、PDF 预览、来源定位等核心功能。
 

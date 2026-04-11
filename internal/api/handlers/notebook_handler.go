@@ -58,7 +58,8 @@ type notebookCreateSessionRequest struct {
 }
 
 type chatMessageRequest struct {
-	Question string `json:"question" binding:"required,min=1,max=4000"`
+	Question     string   `json:"question" binding:"required,min=1,max=4000"`
+	DocumentIDs []string `json:"document_ids"`
 }
 
 type searchRequest struct {
@@ -438,7 +439,7 @@ func (h *NotebookHandler) StreamChat(c *gin.Context) {
 	c.Header("Transfer-Encoding", "chunked")
 
 	// Stream response — 传入预加载的 session 对象避免重复查询
-	err := h.chatService.StreamChatWithSession(c.Request.Context(), userID, session, req.Question, func(reply *service.NotebookChatReply) bool {
+	err := h.chatService.StreamChatWithSession(c.Request.Context(), userID, session, req.Question, req.DocumentIDs, func(reply *service.NotebookChatReply) bool {
 		data, _ := json.Marshal(reply)
 		_, err := c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", data))
 		if err != nil {

@@ -8,6 +8,7 @@ import (
 
 	"NotebookAI/internal/configs"
 	"NotebookAI/internal/models"
+	"NotebookAI/internal/observability"
 	"NotebookAI/internal/repository"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/embeddings"
@@ -167,14 +168,25 @@ func (s *notebookService) GetDocumentGuide(ctx context.Context, documentID strin
 
 // ProcessDocumentWithGuide processes document content, generates chunks, vectors, and creates summary/FAQ
 func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, notebookID, documentID string, content string) error {
+	// 初始化处理计时器
+	processTimer := observability.NewStopwatch()
+
 	// Step 1: Split content into chunks with page numbers
 	splitter := textsplitter.NewRecursiveCharacter(
 		textsplitter.WithChunkSize(1000),
 		textsplitter.WithChunkOverlap(200),
 	)
 
+	splitTimer := observability.NewStopwatch()
 	chunks, err := splitter.SplitText(content)
+	splitLatency := splitTimer.ElapsedMs()
 	if err != nil {
+		zap.L().Error("document processing: split failed",
+			zap.String("document_id", documentID),
+			zap.String("notebook_id", notebookID),
+			zap.Int64("split_latency_ms", splitLatency),
+			zap.Error(err),
+		)
 		return s.failGuide(ctx, documentID, fmt.Errorf("split content: %w", err))
 	}
 
@@ -199,6 +211,7 @@ func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, 
 	}
 
 	// Step 3: Embed chunks in parallel using goroutines
+	embedTimer := observability.NewStopwatch()
 	vectors := make([][]float32, len(notebookChunks))
 	var embedErr error
 	var wg sync.WaitGroup
@@ -235,8 +248,22 @@ func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, 
 	}
 
 	if embedErr != nil {
+		zap.L().Error("document processing: embed failed",
+			zap.String("document_id", documentID),
+			zap.Int64("embed_latency_ms", embedTimer.ElapsedMs()),
+			zap.Error(embedErr),
+		)
 		return s.failGuide(ctx, documentID, fmt.Errorf("embed chunks: %w", embedErr))
 	}
+
+	zap.L().Info("document processing: embed completed",
+		zap.String("document_id", documentID),
+		zap.Int64("embed_latency_ms", embedTimer.ElapsedMs()),
+		zap.Int("chunk_count", len(notebookChunks)),
+	)
+
+	// 记录 Embed LLM 调用指标
+	observability.LogLLMCall("embed", 0, 0, len(notebookChunks)*100, embedTimer.ElapsedMs(), "text-embedding-3-small", nil)
 
 	// Step 4: Insert vectors into Milvus
 	if s.vectorStore != nil {
@@ -252,6 +279,8 @@ func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, 
 		zap.String("document_id", documentID),
 		zap.String("notebook_id", notebookID),
 		zap.Int("chunks", len(notebookChunks)),
+		zap.Int64("total_process_ms", processTimer.ElapsedMs()),
+		zap.Int64("split_latency_ms", splitLatency),
 	)
 
 	return nil
@@ -259,6 +288,7 @@ func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, 
 
 // generateGuideAsync generates summary and FAQ for document in background
 func (s *notebookService) generateGuideAsync(ctx context.Context, notebookID, documentID string, chunks []repository.NotebookChunk) {
+	guideTimer := observability.NewStopwatch()
 	defer func() {
 		if r := recover(); r != nil {
 			zap.L().Error("generateGuideAsync panicked", zap.Any("error", r))
@@ -280,6 +310,7 @@ func (s *notebookService) generateGuideAsync(ctx context.Context, notebookID, do
 	}
 
 	// Generate Summary
+	summaryTimer := observability.NewStopwatch()
 	summaryPrompt := fmt.Sprintf(`You are an AI assistant that generates concise summaries of documents.
 
 Analyze the following document content and provide:
@@ -294,12 +325,17 @@ Document Content:
 Summary:`, content)
 
 	summary, err := s.generateLLMResponse(ctx, summaryPrompt)
+	summaryLatency := summaryTimer.ElapsedMs()
 	if err != nil {
-		zap.L().Error("generate summary failed", zap.Error(err))
+		zap.L().Error("generate summary failed", zap.Error(err), zap.Int64("latency_ms", summaryLatency))
+		observability.LogLLMCall("guide_summary", estimateTokens(summaryPrompt), estimateTokens(summary), estimateTokens(summaryPrompt)+estimateTokens(summary), summaryLatency, "gpt-4o-mini", err)
 		summary = "Summary generation failed"
+	} else {
+		observability.LogLLMCall("guide_summary", estimateTokens(summaryPrompt), estimateTokens(summary), estimateTokens(summaryPrompt)+estimateTokens(summary), summaryLatency, "gpt-4o-mini", nil)
 	}
 
 	// Generate FAQ
+	faqTimer := observability.NewStopwatch()
 	faqPrompt := fmt.Sprintf(`You are an AI assistant that generates FAQ sections for documents.
 
 Based on the following document content, generate 5 frequently asked questions and their answers.
@@ -313,12 +349,17 @@ Document Content:
 FAQ:`, content)
 
 	faqJSON, err := s.generateLLMResponse(ctx, faqPrompt)
+	faqLatency := faqTimer.ElapsedMs()
 	if err != nil {
-		zap.L().Error("generate FAQ failed", zap.Error(err))
+		zap.L().Error("generate FAQ failed", zap.Error(err), zap.Int64("latency_ms", faqLatency))
+		observability.LogLLMCall("guide_faq", estimateTokens(faqPrompt), 0, estimateTokens(faqPrompt), faqLatency, "gpt-4o-mini", err)
 		faqJSON = "[]"
+	} else {
+		observability.LogLLMCall("guide_faq", estimateTokens(faqPrompt), estimateTokens(faqJSON), estimateTokens(faqPrompt)+estimateTokens(faqJSON), faqLatency, "gpt-4o-mini", nil)
 	}
 
 	// Generate Key Points
+	kpTimer := observability.NewStopwatch()
 	keyPointsPrompt := fmt.Sprintf(`You are an AI assistant that extracts key points from documents.
 
 Extract 5-7 key takeaways from the document. Format as JSON array of strings.
@@ -331,10 +372,20 @@ Document Content:
 Key Points:`, content)
 
 	keyPoints, err := s.generateLLMResponse(ctx, keyPointsPrompt)
+	kpLatency := kpTimer.ElapsedMs()
 	if err != nil {
-		zap.L().Error("generate key points failed", zap.Error(err))
+		zap.L().Error("generate key points failed", zap.Error(err), zap.Int64("latency_ms", kpLatency))
+		observability.LogLLMCall("guide_keypoints", estimateTokens(keyPointsPrompt), 0, estimateTokens(keyPointsPrompt), kpLatency, "gpt-4o-mini", err)
 		keyPoints = "[]"
+	} else {
+		observability.LogLLMCall("guide_keypoints", estimateTokens(keyPointsPrompt), estimateTokens(keyPoints), estimateTokens(keyPointsPrompt)+estimateTokens(keyPoints), kpLatency, "gpt-4o-mini", nil)
 	}
+
+	// 记录总 Guide 生成耗时
+	zap.L().Info("guide generation completed",
+		zap.String("document_id", documentID),
+		zap.Int64("total_guide_latency_ms", guideTimer.ElapsedMs()),
+	)
 
 	// Save guide to database
 	guide := &models.DocumentGuide{

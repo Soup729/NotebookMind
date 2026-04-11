@@ -1,8 +1,8 @@
-# Enterprise PDF AI - API 文档
+# NotebookMind - API 文档
 
 ## 概述
 
-Enterprise PDF AI 是一个基于 NotebookLM 理念的企业级 PDF 智能分析平台，支持多文档理解、智能问答、研究笔记管理等功能。
+NotebookMind 是一个基于 NotebookLM 理念的企业级 PDF 智能分析平台，支持多文档理解、智能问答、研究笔记管理等功能。
 
 **基础 URL**: `http://localhost:8080/api/v1`
 

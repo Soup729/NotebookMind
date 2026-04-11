@@ -62,7 +62,8 @@ func New(
 		protected.GET("/chat/sessions/:id/messages", chatHandler.ListMessages)
 		protected.POST("/chat/sessions/:id/messages", chatHandler.SendMessage)
 		protected.POST("/chat/sessions/:id/stream", chatHandler.StreamSendMessage)
-		protected.POST("/chat/sessions/:id/recommendations", chatHandler.GetRecommendations)
+
+		protected.GET("/chat/models", chatHandler.ListModels)
 		protected.POST("/chat/sessions/:id/messages/:messageId/reflection", chatHandler.GetReflection)
 
 		protected.GET("/search", searchHandler.Search)

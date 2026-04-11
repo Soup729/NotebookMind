@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"NotebookAI/internal/models"
+	"NotebookAI/internal/observability"
 	"NotebookAI/internal/repository"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/schema"
@@ -38,7 +39,6 @@ type ChatService interface {
 	SendMessage(ctx context.Context, userID, sessionID, question string, documentIDs []string) (*ChatReply, error)
 	Search(ctx context.Context, userID, query string, topK int, documentIDs []string) ([]ChatSource, error)
 	StreamSendMessage(ctx context.Context, opts StreamChatOptions) error
-	GenerateRecommendedQuestions(ctx context.Context, userID, sessionID string) ([]string, error)
 	GenerateReflection(ctx context.Context, userID, sessionID, messageID string) (*ReflectionResult, error)
 }
 
@@ -96,28 +96,58 @@ func (s *chatService) ListMessages(ctx context.Context, userID, sessionID string
 }
 
 func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, question string, documentIDs []string) (*ChatReply, error) {
+	totalTimer := observability.NewStopwatch()
+	requestID := uuid.NewString()
+	metrics := observability.NewChatMetrics(requestID, sessionID, userID, "chat")
+
 	session, err := s.chatRepo.GetSession(ctx, userID, sessionID)
 	if err != nil {
+		metrics.ErrorType = "session_load_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		return nil, fmt.Errorf("load session: %w", err)
 	}
 
 	history, err := s.chatRepo.ListSessionMessages(ctx, userID, sessionID, s.historyLimit)
 	if err != nil {
+		metrics.ErrorType = "history_load_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		return nil, fmt.Errorf("load chat history: %w", err)
 	}
 
+	// 检索阶段计时
+	retrievalTimer := observability.NewStopwatch()
 	retrievedDocs, err := s.llmService.RetrieveContext(ctx, question, s.retrievalTopK, RetrievalOptions{
 		UserID:      userID,
 		DocumentIDs: documentIDs,
 	})
+	metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
 	if err != nil {
+		metrics.ErrorType = "retrieval_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		return nil, fmt.Errorf("retrieve source documents: %w", err)
 	}
 
 	sources := documentsToSources(retrievedDocs)
+	metrics.RetrievedChunks = len(sources)
+	metrics.TopK = s.retrievalTopK
+
 	prompt := buildPrompt(history, sources, question)
+
+	// LLM 生成阶段计时
+	llmTimer := observability.NewStopwatch()
 	answer, err := s.llmService.GenerateAnswer(ctx, prompt)
+	metrics.LLMLatencyMs = llmTimer.ElapsedMs()
 	if err != nil {
+		metrics.ErrorType = "llm_generation_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		return nil, fmt.Errorf("generate answer: %w", err)
 	}
 
@@ -164,6 +194,15 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, questi
 	}
 	session.Title = title
 	session.LastMessageAt = now
+
+	// 记录完整的聊天指标
+	metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+	metrics.PromptTokens = answer.PromptTokens
+	metrics.CompletionTokens = answer.CompletionTokens
+	metrics.TotalTokens = answer.TotalTokens
+	metrics.SourceCount = len(sources)
+	metrics.SourceDocumentIDs = getSourceDocumentIDs(sources)
+	observability.LogChatRequest(metrics)
 
 	return &ChatReply{
 		Session: session,
@@ -271,11 +310,32 @@ func buildSessionTitle(question string) string {
 	return title
 }
 
+// getSourceDocumentIDs 从来源列表中提取文档 ID 列表（用于日志）
+func getSourceDocumentIDs(sources []ChatSource) []string {
+	ids := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, src := range sources {
+		if _, exists := seen[src.DocumentID]; !exists && src.DocumentID != "" {
+			ids = append(ids, src.DocumentID)
+			seen[src.DocumentID] = struct{}{}
+		}
+	}
+	return ids
+}
+
 // StreamSendMessage performs RAG-based chat with SSE streaming response
 func (s *chatService) StreamSendMessage(ctx context.Context, opts StreamChatOptions) error {
+	totalTimer := observability.NewStopwatch()
+	requestID := uuid.NewString()
+	metrics := observability.NewChatMetrics(requestID, opts.SessionID, opts.UserID, "chat")
+
 	// Step 1: Load session
 	session, err := s.chatRepo.GetSession(ctx, opts.UserID, opts.SessionID)
 	if err != nil {
+		metrics.ErrorType = "session_load_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		if opts.OnError != nil {
 			opts.OnError(fmt.Errorf("load session: %w", err))
 		}
@@ -285,18 +345,28 @@ func (s *chatService) StreamSendMessage(ctx context.Context, opts StreamChatOpti
 	// Step 2: Get conversation history
 	history, err := s.chatRepo.ListSessionMessages(ctx, opts.UserID, opts.SessionID, s.historyLimit)
 	if err != nil {
+		metrics.ErrorType = "history_load_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		if opts.OnError != nil {
 			opts.OnError(fmt.Errorf("load history: %w", err))
 		}
 		return fmt.Errorf("load history: %w", err)
 	}
 
-	// Step 3: Retrieve relevant chunks
+	// Step 3: Retrieve relevant chunks (with timing)
+	retrievalTimer := observability.NewStopwatch()
 	retrievedDocs, err := s.llmService.RetrieveContext(ctx, opts.Question, s.retrievalTopK, RetrievalOptions{
 		UserID:      opts.UserID,
 		DocumentIDs: opts.DocumentIDs,
 	})
+	metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
 	if err != nil {
+		metrics.ErrorType = "retrieval_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		if opts.OnError != nil {
 			opts.OnError(fmt.Errorf("retrieve source documents: %w", err))
 		}
@@ -304,8 +374,14 @@ func (s *chatService) StreamSendMessage(ctx context.Context, opts StreamChatOpti
 	}
 
 	sources := documentsToSources(retrievedDocs)
+	metrics.RetrievedChunks = len(sources)
+	metrics.TopK = s.retrievalTopK
 	prompt := buildPrompt(history, sources, opts.Question)
 	promptTokens := estimateTokens(prompt)
+
+	// 记录检索事件
+	sourceDocIDs := getSourceDocumentIDs(sources)
+	observability.LogRetrievalEvent(opts.Question, s.retrievalTopK, len(sources), metrics.RetrievalLatency, sourceDocIDs)
 
 	// Step 4: Send sources event first
 	if opts.OnSource != nil {
@@ -314,14 +390,23 @@ func (s *chatService) StreamSendMessage(ctx context.Context, opts StreamChatOpti
 		}
 	}
 
-	// Step 5: Generate response
+	// Step 5: Generate response (with timing)
+	llmTimer := observability.NewStopwatch()
 	answer, err := s.llmService.GenerateAnswer(ctx, prompt)
+	metrics.LLMLatencyMs = llmTimer.ElapsedMs()
 	if err != nil {
+		metrics.ErrorType = "llm_generation_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		if opts.OnError != nil {
 			opts.OnError(fmt.Errorf("generate answer: %w", err))
 		}
 		return fmt.Errorf("generate answer: %w", err)
 	}
+
+	// 记录 LLM 调用指标
+	observability.LogLLMCall("generate", answer.PromptTokens, answer.CompletionTokens, answer.TotalTokens, metrics.LLMLatencyMs, "openai", nil)
 
 	// Step 6: Stream response tokens (chunk size ~20 chars for natural feel)
 	messageID := uuid.NewString()
@@ -384,71 +469,16 @@ func (s *chatService) StreamSendMessage(ctx context.Context, opts StreamChatOpti
 	}
 	_ = s.chatRepo.UpdateSessionActivity(ctx, opts.UserID, opts.SessionID, title, now)
 
+	// 记录完整的流式聊天指标
+	metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+	metrics.PromptTokens = answer.PromptTokens
+	metrics.CompletionTokens = answer.CompletionTokens
+	metrics.TotalTokens = answer.TotalTokens
+	metrics.SourceCount = len(sources)
+	metrics.SourceDocumentIDs = sourceDocIDs
+	observability.LogChatRequest(metrics)
+
 	return nil
-}
-
-// GenerateRecommendedQuestions generates suggested follow-up questions based on the conversation context
-func (s *chatService) GenerateRecommendedQuestions(ctx context.Context, userID, sessionID string) ([]string, error) {
-	// Load session and messages
-	_, err := s.chatRepo.GetSession(ctx, userID, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("load session: %w", err)
-	}
-
-	messages, err := s.chatRepo.ListSessionMessages(ctx, userID, sessionID, 10)
-	if err != nil {
-		return nil, fmt.Errorf("load messages: %w", err)
-	}
-
-	// Build context from recent messages
-	var contextBuilder strings.Builder
-	for _, msg := range messages {
-		if msg.Role == "user" {
-			contextBuilder.WriteString(fmt.Sprintf("User: %s\n", msg.Content))
-		} else if msg.Role == "assistant" {
-			contextBuilder.WriteString(fmt.Sprintf("Assistant: %s\n", msg.Content))
-		}
-	}
-
-	// Retrieve relevant context
-	latestQuestion := ""
-	if len(messages) > 0 {
-		for i := len(messages) - 1; i >= 0; i-- {
-			if messages[i].Role == "user" {
-				latestQuestion = messages[i].Content
-				break
-			}
-		}
-	}
-
-	docs, err := s.llmService.RetrieveContext(ctx, latestQuestion, s.retrievalTopK, RetrievalOptions{
-		UserID: userID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("retrieve context: %w", err)
-	}
-
-	sources := documentsToSources(docs)
-
-	// Build context string for question generation
-	contextBuilder.WriteString("\nRetrieved context:\n")
-	for _, src := range sources {
-		contextBuilder.WriteString(fmt.Sprintf("- [%s] %s\n", src.FileName, src.Content))
-	}
-
-	// Generate recommended questions
-	questions, err := s.llmService.GenerateRecommendedQuestions(ctx, contextBuilder.String(), 3)
-	if err != nil {
-		zap.L().Warn("failed to generate recommended questions", zap.Error(err))
-		// Return default questions as fallback
-		return []string{
-			"Can you summarize the key points?",
-			"What are the main conclusions?",
-			"Can you explain this in more detail?",
-		}, nil
-	}
-
-	return questions, nil
 }
 
 // GenerateReflection analyzes a specific message and provides feedback

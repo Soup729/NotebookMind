@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - 笔记本工作台页面 (核心)
+// NotebookMind - 笔记本工作台页面 (核心)
 // ============================================================
 
 'use client';
@@ -7,7 +7,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { ArrowLeft, Plus, Loader2, GripHorizontal, MessageSquare, Trash2, ChevronDown } from 'lucide-react';
+import { ArrowLeft, Plus, Loader2, GripHorizontal, MessageSquare, Trash2, ChevronDown, Pencil, Check, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -31,7 +31,7 @@ import { DocumentGuide } from '@/components/guide/DocumentGuide';
 
 // Hooks
 import { useNotebook } from '@/hooks/useNotebook';
-import { useDocuments, useUploadDocument, useDeleteDocument } from '@/hooks/useNotebook';
+import { useDocuments, useUploadDocument, useDeleteDocument, useUpdateNotebook } from '@/hooks/useNotebook';
 import { useSessions, useCreateSession, useDeleteSession } from '@/hooks/useNotebook';
 import { useNotebookStore } from '@/store/useNotebookStore';
 
@@ -44,9 +44,11 @@ import type { Session, Document } from '@/types/api';
 interface GuideViewProps {
   notebookId: string;
   documents: Document[];
+  /** 点击建议问题时的回调 */
+  onSuggestedQueryClick?: (query: string) => void;
 }
 
-function GuideView({ notebookId, documents }: GuideViewProps) {
+function GuideView({ notebookId, documents, onSuggestedQueryClick }: GuideViewProps) {
   const completedDocs = documents.filter((d) => d.status === 'completed');
 
   if (completedDocs.length === 0) {
@@ -85,6 +87,7 @@ function GuideView({ notebookId, documents }: GuideViewProps) {
             key={doc.id}
             notebookId={notebookId}
             documentId={doc.id}
+            onSuggestedQueryClick={onSuggestedQueryClick}
           />
         ))}
       </div>
@@ -110,7 +113,11 @@ export default function NotebookPage() {
     activePdfId,
     selectedDocumentIds,
     highlightTarget,
+    activeSessionId: storedSessionId,
+    _hasHydrated,
+    currentNotebookId: storedNotebookId,
     setNotebookAndSession,
+    setActiveSession,
     setSelectedDocuments,
     toggleDocumentSelection,
     setMainViewToPdf,
@@ -127,11 +134,20 @@ export default function NotebookPage() {
   const { deleteDocument } = useDeleteDocument();
   const { createSession } = useCreateSession();
   const { deleteSession } = useDeleteSession();
+  const { updateNotebook } = useUpdateNotebook();
 
   // 当前会话
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   // 防止重复创建会话的锁
   const isCreatingRef = useRef(false);
+
+  // 从文档指南点击的建议问题（传递给 ChatPanel 填充输入框）
+  const [pendingSuggestedQuery, setPendingSuggestedQuery] = useState<string | null>(null);
+
+  // 笔记本改名状态
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   // ChatPanel 高度拖动调整 (带记忆功能)
   const [chatHeight, setChatHeight] = useState(() => {
@@ -183,15 +199,19 @@ export default function NotebookPage() {
     };
   }, [isDragging]);
 
-  // ============================================================
-  // 初始化
-  // ============================================================
-
+  // 初始化：设置当前笔记本（保留属于当前 notebook 的 activeSessionId）
+  // 关键：必须等 _hasHydrated=true 后再判断，否则 storedNotebookId 还是初始值 null，
+  // 导致每次进入页面都错误地认为"切换了新笔记本"，从而把 activeSessionId 重置为 null
   useEffect(() => {
-    if (notebookId) {
-      setNotebookAndSession(notebookId);
+    if (notebookId && _hasHydrated) {
+      if (storedNotebookId !== notebookId) {
+        // 切换到新笔记本时，只保留属于当前 notebook 的 session ID
+        // 这样后续的 session 恢复逻辑能正确从 storedSessionId 恢复
+        const sessionForThisNotebook = (storedNotebookId === notebookId ? storedSessionId : undefined) || undefined;
+        setNotebookAndSession(notebookId, sessionForThisNotebook);
+      }
     }
-  }, [notebookId, setNotebookAndSession]);
+  }, [notebookId, storedNotebookId, storedSessionId, _hasHydrated, setNotebookAndSession]);
 
   // 文档选择由用户手动控制，不再自动全选
   // 如需恢复自动选中，取消下方注释即可：
@@ -205,9 +225,22 @@ export default function NotebookPage() {
   // }, [documents, selectedDocumentIds.length, setSelectedDocuments]);
 
   // 自动创建或选择会话
+  // 依赖 _hasHydrated 确保 Zustand persist 已从 localStorage 恢复
+  // 优先级：1. Store 中持久化的 activeSessionId（上次使用的）→ 2. 最近活跃的 session
   useEffect(() => {
-    if (sessions.length > 0 && !currentSession) {
-      // 选择最近的会话
+    if (sessions.length > 0 && !currentSession && _hasHydrated) {
+      // 尝试从 Store 恢复上次使用的 session（且属于当前 notebook）
+      if (storedSessionId && storedNotebookId === notebookId) {
+        const found = sessions.find((s) => s.id === storedSessionId);
+        if (found) {
+          console.debug('[NotebookPage] Restored previous session:', storedSessionId);
+          setCurrentSession(found);
+          return;
+        }
+        console.debug('[NotebookPage] Stored session not found in sessions list, falling back to latest');
+      }
+
+      // 回退：选择最近活跃的会话
       const sorted = [...sessions].sort(
         (a, b) =>
           new Date(b.last_message_at).getTime() -
@@ -215,7 +248,7 @@ export default function NotebookPage() {
       );
       setCurrentSession(sorted[0]);
     }
-  }, [sessions, currentSession]);
+  }, [sessions, currentSession, storedSessionId, storedNotebookId, notebookId, _hasHydrated]);
 
   // ============================================================
   // 文档操作
@@ -260,6 +293,7 @@ export default function NotebookPage() {
       });
       if (session) {
         setCurrentSession(session);
+        setActiveSession(session.id);
         toast.success('新会话已创建');
       }
     } finally {
@@ -285,8 +319,10 @@ export default function NotebookPage() {
   const handleSelectSession = useCallback(
     (session: Session) => {
       setCurrentSession(session);
+      // 同步到 Store 以便刷新后恢复
+      setActiveSession(session.id);
     },
-    []
+    [setActiveSession]
   );
 
   // ============================================================
@@ -298,6 +334,56 @@ export default function NotebookPage() {
       setSelectedDocuments(ids);
     },
     [setSelectedDocuments]
+  );
+
+  // ============================================================
+  // 建议问题点击（从文档指南 → ChatPanel 输入框）
+  // ============================================================
+
+  const handleSuggestedQueryClick = useCallback((query: string) => {
+    setPendingSuggestedQuery(query);
+    // 切换到 PDF 视图（如果不在的话）让用户看到输入框
+    if (mainView === 'guide') {
+      setMainViewToPdf(activePdfId || (documents.length > 0 ? documents[0].id : ''));
+    }
+  }, [mainView, activePdfId, documents, setMainViewToPdf]);
+
+  // ============================================================
+  // 笔记本改名
+  // ============================================================
+
+  const startRename = useCallback(() => {
+    setRenameValue(notebook?.title || '');
+    setIsRenaming(true);
+    setTimeout(() => renameInputRef.current?.select(), 50);
+  }, [notebook?.title]);
+
+  const confirmRename = useCallback(async () => {
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === notebook?.title) {
+      setIsRenaming(false);
+      return;
+    }
+    const ok = await updateNotebook(notebookId, { title: trimmed });
+    if (ok) setIsRenaming(false);
+  }, [notebookId, notebook?.title, renameValue, updateNotebook]);
+
+  const cancelRename = useCallback(() => {
+    setIsRenaming(false);
+    setRenameValue('');
+  }, []);
+
+  // Enter 键确认改名
+  const handleRenameKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        confirmRename();
+      } else if (e.key === 'Escape') {
+        cancelRename();
+      }
+    },
+    [confirmRename, cancelRename]
   );
 
   // ============================================================
@@ -377,7 +463,37 @@ export default function NotebookPage() {
               <ArrowLeft className="w-4 h-4" />
             </Button>
             <div>
-              <h1 className="font-semibold text-sm">{notebook.title}</h1>
+              {isRenaming ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    ref={renameInputRef}
+                    type="text"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onKeyDown={handleRenameKeyDown}
+                    onBlur={confirmRename}
+                    className="font-semibold text-sm bg-background border border-primary/50 rounded px-2 py-0.5 outline-none focus:ring-1 focus:ring-primary/30 max-w-[200px]"
+                    maxLength={255}
+                  />
+                  <button onClick={confirmRename} className="p-0.5 hover:bg-muted rounded" title="确认">
+                    <Check className="w-3.5 h-3.5 text-green-600" />
+                  </button>
+                  <button onClick={cancelRename} className="p-0.5 hover:bg-muted rounded" title="取消">
+                    <X className="w-3.5 h-3.5 text-muted-foreground" />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 group">
+                  <h1 className="font-semibold text-sm">{notebook.title}</h1>
+                  <button
+                    onClick={startRename}
+                    className="p-0.5 opacity-0 group-hover:opacity-100 hover:opacity-100 transition-opacity"
+                    title="重命名笔记本"
+                  >
+                    <Pencil className="w-3 h-3 text-muted-foreground" />
+                  </button>
+                </div>
+              )}
               <p className="text-xs text-muted-foreground">
                 {documents.length} 个文档 · {sessions.length} 个会话
               </p>
@@ -454,7 +570,11 @@ export default function NotebookPage() {
         {/* 主视图内容 */}
         <main className="flex-1 overflow-hidden">
           {mainView === 'guide' ? (
-            <GuideView notebookId={notebookId} documents={documents} />
+            <GuideView
+              notebookId={notebookId}
+              documents={documents}
+              onSuggestedQueryClick={handleSuggestedQueryClick}
+            />
           ) : activePdfId ? (
             <PdfViewer
               documentId={activePdfId}
@@ -492,12 +612,25 @@ export default function NotebookPage() {
 
           {/* 对话面板 */}
           <div className="flex-1 min-h-0">
-            <ChatPanel
-              notebookId={notebookId}
-              sessionId={currentSession?.id || null}
-              onSessionCreate={handleCreateSession}
-              className="h-full border-0 rounded-none"
-            />
+            {/* 等待 Zustand hydrate 完成且 session 已选定后再渲染 ChatPanel */}
+            {/* 避免在 sessionId 为 null 时渲染 ChatPanel 导致显示空状态（EmptyState） */}
+            {!_hasHydrated ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="flex flex-col items-center gap-3 text-muted-foreground">
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                  <p className="text-sm">正在恢复会话...</p>
+                </div>
+              </div>
+            ) : (
+              <ChatPanel
+                key={currentSession?.id || 'no-session'}
+                notebookId={notebookId}
+                sessionId={currentSession?.id || null}
+                onSessionCreate={handleCreateSession}
+                pendingQuery={pendingSuggestedQuery}
+                className="h-full border-0 rounded-none"
+              />
+            )}
           </div>
         </div>
       </div>

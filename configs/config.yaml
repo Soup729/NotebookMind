@@ -1,7 +1,7 @@
 app:
   name: "NotebookAI"
   env: "development"
-  port: 8080
+  port: 8081
 
 log:
   level: "debug"
@@ -75,3 +75,31 @@ asynq:
 chat:
   history_limit: 20
   retrieval_top_k: 5
+
+# 文档解析配置（Phase 1: 结构化文档理解）
+parser:
+  chunk_size: 1000           # 父块最大字符数
+  chunk_overlap: 200          # 父块重叠字符数
+  child_chunk_size: 300       # 子块（用于召回）最大字符数
+  extract_tables: true        # 提取表格结构
+  table_max_rows: 100         # 单表最大行数
+  table_max_cols: 20          # 单表最大列数
+  extract_images: true        # 提取图片块
+  image_min_size: 50          # 最小图片尺寸（像素）
+  vlm_enabled: false          # 是否启用 VLM 图片描述（需配置 vl m.api_key）
+  vlm_batch_size: 5           # VLM 批处理大小
+  ocr_threshold: 0.1          # 文本密度阈值，低于此值触发 OCR
+  ocr_enabled: true           # 启用 OCR 能力
+  detect_headings: true       # 检测标题层级
+
+# OCR 服务配置
+ocr:
+  provider: "fallback"        # "rapidocr" | "fallback"
+  base_url: ""                # RapidOCR 服务地址（如 http://localhost:8868）
+
+# VLM 视觉语言模型配置（图片描述生成）
+vlm:
+  enabled: false              # 是否启用 VLM 图片描述
+  api_key: ""                 # API Key（默认复用 OPENAI_API_KEY）
+  base_url: ""                # Base URL（默认复用 OPENAI_BASE_URL）
+  model: "gpt-4o-mini"        # 模型名称

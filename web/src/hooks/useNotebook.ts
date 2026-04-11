@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - 笔记本 & 文档 SWR Hooks
+// NotebookMind - 笔记本 & 文档 SWR Hooks
 // ============================================================
 
 'use client';
@@ -673,3 +673,33 @@ export function useTogglePinNote() {
 
   return { togglePin };
 }
+
+// ============================================================
+// 模型列表 Hook
+// ============================================================
+
+/**
+ * 获取可用 LLM 模型列表
+ */
+export function useAvailableModels() {
+  const { data, error, isLoading } = useSWR(
+    [API_ENDPOINTS.models, getAuthToken()],
+    ([url, token]) => apiFetch<import('@/types/api').ModelsResponse>(url, { token }),
+    {
+      revalidateOnFocus: false,
+      revalidateIfStale: false,
+      onError: (err) => {
+        console.debug('获取模型列表失败:', err.message);
+      },
+    }
+  );
+
+  return {
+    models: data?.models || [],
+    defaultProvider: data?.default_provider || 'openai',
+    isLoading,
+    error,
+  };
+}
+
+

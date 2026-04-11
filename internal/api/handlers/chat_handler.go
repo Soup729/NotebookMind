@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"NotebookAI/internal/configs"
 	"NotebookAI/internal/models"
 	"NotebookAI/internal/repository"
 	"NotebookAI/internal/service"
@@ -16,6 +17,7 @@ import (
 
 type ChatHandler struct {
 	chatService service.ChatService
+	llmConfig   *configs.LLMConfig
 }
 
 type createSessionRequest struct {
@@ -27,8 +29,8 @@ type messageRequest struct {
 	DocumentIDs []string `json:"document_ids"`
 }
 
-func NewChatHandler(chatService service.ChatService) *ChatHandler {
-	return &ChatHandler{chatService: chatService}
+func NewChatHandler(chatService service.ChatService, llmConfig *configs.LLMConfig) *ChatHandler {
+	return &ChatHandler{chatService: chatService, llmConfig: llmConfig}
 }
 
 func (h *ChatHandler) CreateSession(c *gin.Context) {
@@ -259,28 +261,6 @@ func (h *ChatHandler) StreamSendMessage(c *gin.Context) {
 	c.Writer.Flush()
 }
 
-// GetRecommendations returns recommended follow-up questions
-func (h *ChatHandler) GetRecommendations(c *gin.Context) {
-	userID, ok := getUserID(c)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
-		return
-	}
-
-	sessionID := c.Param("id")
-
-	questions, err := h.chatService.GenerateRecommendedQuestions(c.Request.Context(), userID, sessionID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate recommendations"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"session_id": sessionID,
-		"questions":  questions,
-	})
-}
-
 // GetReflection returns an AI reflection on a specific message
 func (h *ChatHandler) GetReflection(c *gin.Context) {
 	userID, ok := getUserID(c)
@@ -302,5 +282,20 @@ func (h *ChatHandler) GetReflection(c *gin.Context) {
 		"session_id": sessionID,
 		"message_id": messageID,
 		"reflection": reflection,
+	})
+}
+
+// ListModels returns all available LLM models for user selection
+func (h *ChatHandler) ListModels(c *gin.Context) {
+	if h.llmConfig == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "LLM configuration not available"})
+		return
+	}
+
+	models := h.llmConfig.GetAvailableModels()
+
+	c.JSON(http.StatusOK, gin.H{
+		"models":          models,
+		"default_provider": h.llmConfig.DefaultProvider,
 	})
 }

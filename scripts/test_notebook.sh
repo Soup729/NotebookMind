@@ -1,5 +1,5 @@
 #!/bin/bash
-# Enterprise PDF AI - NotebookLM 功能验证脚本
+# NotebookMind - NotebookLM 功能验证脚本
 # 使用方法: ./scripts/test_notebook.sh
 
 set -e
@@ -399,7 +399,7 @@ test_health_check() {
 
 main() {
     echo "=========================================="
-    echo "  Enterprise PDF AI - NotebookLM 验证测试"
+    echo "  NotebookMind - NotebookLM 验证测试"
     echo "=========================================="
     echo ""
 

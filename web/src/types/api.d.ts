@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - API 类型定义
+// NotebookMind - API 类型定义
 // ============================================================
 
 // ============================================================
@@ -326,6 +326,9 @@ export interface NotebookState {
   // 高亮目标
   highlightTarget: HighlightTarget | null;
 
+  // 模型选择
+  selectedModel: string | null; // 模型 ID，null = 使用默认模型
+
   // 操作方法
   setNotebookAndSession: (nbId: string, sId?: string) => void;
   setActiveSession: (sId: string | null) => void;
@@ -334,6 +337,7 @@ export interface NotebookState {
   setMainViewToPdf: (docId: string, target?: HighlightTarget) => void;
   setMainViewToGuide: () => void;
   clearHighlightTarget: () => void;
+  setSelectedModel: (modelId: string | null) => void;
 }
 
 // ============================================================
@@ -356,6 +360,26 @@ export interface ChatPanelProps {
   notebookId: string;
   sessionId: string | null;
   onSessionCreate?: (session: Session) => void;
+  documents?: Document[];
+}
+
+// ============================================================
+// LLM 模型 (LLM Models)
+// ============================================================
+
+export interface ModelInfo {
+  id: string;           // "openai:gpt-4o-mini", "custom:deepseek"
+  provider: string;     // "openai", "anthropic", "gemini", "custom"
+  name: string;         // 显示名称
+  model_name: string;   // 实际模型标识
+  base_url?: string;
+  description?: string;
+  is_default: boolean;
+}
+
+export interface ModelsResponse {
+  models: ModelInfo[];
+  default_provider: string;
 }
 
 export interface SourcesPanelProps {

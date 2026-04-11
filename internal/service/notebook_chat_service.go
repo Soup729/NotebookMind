@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"NotebookAI/internal/models"
+	"NotebookAI/internal/observability"
 	"NotebookAI/internal/repository"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/embeddings"
@@ -44,9 +45,9 @@ type NotebookChatService interface {
 	GetSession(ctx context.Context, userID, sessionID string) (*models.ChatSession, error)
 
 	// Streaming chat
-	StreamChat(ctx context.Context, userID, sessionID, question string, send func(reply *NotebookChatReply) bool) error
+	StreamChat(ctx context.Context, userID, sessionID, question string, documentIDs []string, send func(reply *NotebookChatReply) bool) error
 	// StreamChatWithSession 接受预加载的 session 对象，避免重复查询数据库
-	StreamChatWithSession(ctx context.Context, userID string, session *models.ChatSession, question string, send func(reply *NotebookChatReply) bool) error
+	StreamChatWithSession(ctx context.Context, userID string, session *models.ChatSession, question string, documentIDs []string, send func(reply *NotebookChatReply) bool) error
 
 	// Search within notebook
 	SearchNotebook(ctx context.Context, userID, notebookID, query string, topK int) ([]NotebookChatSource, error)
@@ -104,11 +105,10 @@ func (s *notebookChatService) CreateSession(ctx context.Context, userID, noteboo
 }
 
 func (s *notebookChatService) ListSessions(ctx context.Context, userID, notebookID string) ([]models.ChatSession, error) {
-	sessions, err := s.chatRepo.ListSessions(ctx, userID)
+	sessions, err := s.chatRepo.ListSessionsByNotebook(ctx, userID, notebookID)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
-	// Filter by notebook if needed (implementation depends on how sessions are tagged)
 	return sessions, nil
 }
 
@@ -137,74 +137,101 @@ func (s *notebookChatService) GetSession(ctx context.Context, userID, sessionID 
 }
 
 // StreamChat performs RAG-based chat with SSE streaming response
-func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID, question string, send func(reply *NotebookChatReply) bool) error {
+func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID, question string, documentIDs []string, send func(reply *NotebookChatReply) bool) error {
+	totalTimer := observability.NewStopwatch()
+	requestID := uuid.NewString()
+	metrics := observability.NewChatMetrics(requestID, sessionID, userID, "notebook_chat")
+
 	// Step 1: Load session
 	session, err := s.chatRepo.GetSession(ctx, userID, sessionID)
 	if err != nil {
+		metrics.ErrorType = "session_load_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		return fmt.Errorf("load session: %w", err)
 	}
 
 	// Step 2: Get conversation history
 	history, err := s.chatRepo.ListSessionMessages(ctx, userID, sessionID, 10)
 	if err != nil {
+		metrics.ErrorType = "history_load_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		return fmt.Errorf("load history: %w", err)
 	}
 
-	// Step 3: Get notebook and document IDs for scope
-	docIDs, err := s.notebookRepo.GetDocumentIDs(ctx, session.NotebookID)
-	if err != nil {
-		return fmt.Errorf("get notebook documents: %w", err)
-	}
-
-	// Step 4: Retrieve relevant chunks from Milvus
-	// First embed the query
-	queryVector, err := s.embedder.EmbedQuery(ctx, question)
-	if err != nil {
-		return fmt.Errorf("embed query: %w", err)
-	}
-
-	chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
-	if err != nil {
-		return fmt.Errorf("search chunks: %w", err)
-	}
-
-	// Step 5: Build sources with document names
-	// 优化：批量获取文档名，避免 N+1 查询问题（原代码对每个 chunk 单独查一次数据库）
-	sources := make([]NotebookChatSource, 0, len(chunks))
-
-	// 收集所有唯一的 DocumentID
-	docIDSet := make(map[string]struct{}, len(chunks))
-	for _, chunk := range chunks {
-		docIDSet[chunk.DocumentID] = struct{}{}
-	}
-	uniqueDocIDs := make([]string, 0, len(docIDSet))
-	for id := range docIDSet {
-		uniqueDocIDs = append(uniqueDocIDs, id)
-	}
-
-	// 批量查询所有文档名（单次 DB 查询）
-	docNameMap := s.docRepo.GetNamesByIDs(ctx, userID, uniqueDocIDs)
-
-	// 构建 sources 列表
-	for i, chunk := range chunks {
-		docName := docNameMap[chunk.DocumentID]
-		if docName == "" {
-			docName = "Unknown Document"
+	// Step 3: Determine RAG mode
+	// 如果前端传入了 document_ids，则在指定文档中做 RAG 检索；否则跳过检索，降级为纯 AI 对话
+	isRAGMode := len(documentIDs) > 0
+	var docIDs []string
+	if isRAGMode {
+		var err error
+		docIDs, err = s.notebookRepo.GetDocumentIDs(ctx, session.NotebookID)
+		if err != nil {
+			metrics.ErrorType = "get_doc_ids_failed"
+			metrics.ErrorMsg = err.Error()
+			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+			observability.LogChatRequest(metrics)
+			return fmt.Errorf("get notebook documents: %w", err)
 		}
 
-		sources = append(sources, NotebookChatSource{
-			NotebookID:   chunk.NotebookID,
-			DocumentID:   chunk.DocumentID,
-			DocumentName: docName,
-			PageNumber:   chunk.PageNumber,
-			ChunkIndex:   chunk.ChunkIndex,
-			Content:      chunk.Content,
-			Score:        scores[i],
-		})
+		// 构建白名单集合，过滤出 notebook 下同时被用户选中的文档
+		allowedSet := make(map[string]struct{}, len(documentIDs))
+		for _, id := range documentIDs {
+			allowedSet[id] = struct{}{}
+		}
+		var filtered []string
+		for _, id := range docIDs {
+			if _, ok := allowedSet[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) > 0 {
+			docIDs = filtered
+		}
+	}
+
+	// Step 4: Retrieve relevant chunks from Milvus (仅 RAG 模式下执行)
+	retrievalTimer := observability.NewStopwatch()
+	var sources []NotebookChatSource
+
+	if isRAGMode {
+		// First embed the query
+		queryVector, err := s.embedder.EmbedQuery(ctx, question)
+		if err != nil {
+			metrics.ErrorType = "embed_query_failed"
+			metrics.ErrorMsg = err.Error()
+			metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+			observability.LogChatRequest(metrics)
+			return fmt.Errorf("embed query: %w", err)
+		}
+
+		chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
+		metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+		if err != nil {
+			metrics.ErrorType = "vector_search_failed"
+			metrics.ErrorMsg = err.Error()
+			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+			observability.LogChatRequest(metrics)
+			return fmt.Errorf("search chunks: %w", err)
+		}
+
+		// Step 5: Build sources with document names
+		sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
 	}
 
 	// Step 6: Build prompt with strict format
 	prompt := s.buildPrompt(history, sources, question)
+	promptTokens := estimateTokens(prompt)
+
+	// 记录检索事件
+	notebookSourceDocIDs := getNotebookSourceDocumentIDs(sources)
+	observability.LogRetrievalEvent(question, s.retrievalTopK, len(sources), metrics.RetrievalLatency, notebookSourceDocIDs)
+	metrics.RetrievedChunks = len(sources)
+	metrics.TopK = s.retrievalTopK
 
 	// Step 7: Save user message FIRST (before LLM call) — 确保历史记录完整，即使后续AI回答失败也能保留问题
 	messageID := uuid.NewString()
@@ -229,16 +256,31 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 		MessageID:    messageID,
 		Content:      "",
 		Sources:      sources,
-		PromptTokens: estimateTokens(prompt),
+		PromptTokens: promptTokens,
 	}
 	if !send(initialReply) {
 		return fmt.Errorf("client disconnected")
 	}
 
+	// LLM 生成阶段计时
+	llmTimer := observability.NewStopwatch()
 	response, err := llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
+	metrics.LLMLatencyMs = llmTimer.ElapsedMs()
 	if err != nil {
+		metrics.ErrorType = "llm_generation_failed"
+		metrics.ErrorMsg = err.Error()
+		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+		observability.LogChatRequest(metrics)
 		return fmt.Errorf("generate response: %w", err)
 	}
+
+	completionTokens := estimateTokens(response)
+	metrics.PromptTokens = promptTokens
+	metrics.CompletionTokens = completionTokens
+	metrics.TotalTokens = promptTokens + completionTokens
+
+	// 记录 LLM 调用指标
+	observability.LogLLMCall("generate", promptTokens, completionTokens, metrics.TotalTokens, metrics.LLMLatencyMs, "openai", nil)
 
 	// Send final response
 	finalReply := &NotebookChatReply{
@@ -261,9 +303,9 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 		Role:             "assistant",
 		Content:          strings.TrimSpace(response),
 		SourcesJSON:      string(sourcesJSON),
-		PromptTokens:     estimateTokens(prompt),
-		CompletionTokens: estimateTokens(response),
-		TotalTokens:      estimateTokens(prompt) + estimateTokens(response),
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
 		CreatedAt:        now,
 	}
 	if err := s.chatRepo.SaveMessage(ctx, assistantMessage); err != nil {
@@ -277,11 +319,17 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 	}
 	_ = s.chatRepo.UpdateSessionActivity(ctx, userID, sessionID, title, now)
 
+	// 记录完整的流式聊天指标 (StreamChat)
+	metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+	metrics.SourceCount = len(sources)
+	metrics.SourceDocumentIDs = notebookSourceDocIDs
+	observability.LogChatRequest(metrics)
+
 	return nil
 }
 
 // StreamChatWithSession 与 StreamChat 功能相同，但接受预加载的 session 对象，避免重复查询数据库
-func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID string, session *models.ChatSession, question string, send func(reply *NotebookChatReply) bool) error {
+func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID string, session *models.ChatSession, question string, documentIDs []string, send func(reply *NotebookChatReply) bool) error {
 	sessionID := session.ID
 
 	// Step 1: Get conversation history（session 已预加载，跳过）
@@ -290,50 +338,49 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 		return fmt.Errorf("load history: %w", err)
 	}
 
-	// Step 2: Get notebook and document IDs for scope
-	docIDs, err := s.notebookRepo.GetDocumentIDs(ctx, session.NotebookID)
-	if err != nil {
-		return fmt.Errorf("get notebook documents: %w", err)
-	}
-
-	// Step 3: Retrieve relevant chunks from Milvus
-	queryVector, err := s.embedder.EmbedQuery(ctx, question)
-	if err != nil {
-		return fmt.Errorf("embed query: %w", err)
-	}
-
-	chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
-	if err != nil {
-		return fmt.Errorf("search chunks: %w", err)
-	}
-
-	// Step 4: Build sources with batch document name lookup
-	sources := make([]NotebookChatSource, 0, len(chunks))
-
-	docIDSet := make(map[string]struct{}, len(chunks))
-	for _, chunk := range chunks {
-		docIDSet[chunk.DocumentID] = struct{}{}
-	}
-	uniqueDocIDs := make([]string, 0, len(docIDSet))
-	for id := range docIDSet {
-		uniqueDocIDs = append(uniqueDocIDs, id)
-	}
-	docNameMap := s.docRepo.GetNamesByIDs(ctx, userID, uniqueDocIDs)
-
-	for i, chunk := range chunks {
-		docName := docNameMap[chunk.DocumentID]
-		if docName == "" {
-			docName = "Unknown Document"
+	// Step 2: Determine RAG mode
+	// 如果前端传入了 document_ids，则在指定文档中做 RAG 检索；否则跳过检索，降级为纯 AI 对话
+	isRAGMode := len(documentIDs) > 0
+	var docIDs []string
+	if isRAGMode {
+		var err error
+		docIDs, err = s.notebookRepo.GetDocumentIDs(ctx, session.NotebookID)
+		if err != nil {
+			return fmt.Errorf("get notebook documents: %w", err)
 		}
-		sources = append(sources, NotebookChatSource{
-			NotebookID:   chunk.NotebookID,
-			DocumentID:   chunk.DocumentID,
-			DocumentName: docName,
-			PageNumber:   chunk.PageNumber,
-			ChunkIndex:   chunk.ChunkIndex,
-			Content:      chunk.Content,
-			Score:        scores[i],
-		})
+
+		// 构建白名单集合，过滤出 notebook 下同时被用户选中的文档
+		allowedSet := make(map[string]struct{}, len(documentIDs))
+		for _, id := range documentIDs {
+			allowedSet[id] = struct{}{}
+		}
+		var filtered []string
+		for _, id := range docIDs {
+			if _, ok := allowedSet[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) > 0 {
+			docIDs = filtered
+		}
+	}
+
+	// Step 3: Retrieve relevant chunks from Milvus（仅 RAG 模式）
+	var sources []NotebookChatSource
+
+	if isRAGMode {
+		queryVector, err := s.embedder.EmbedQuery(ctx, question)
+		if err != nil {
+			return fmt.Errorf("embed query: %w", err)
+		}
+
+		chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
+		if err != nil {
+			return fmt.Errorf("search chunks: %w", err)
+		}
+
+		// Step 4: Build sources with batch document name lookup
+		sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
 	}
 
 	// Step 5: Build prompt
@@ -461,14 +508,31 @@ func (s *notebookChatService) SearchNotebook(ctx context.Context, userID, notebo
 func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources []NotebookChatSource, question string) string {
 	var builder strings.Builder
 
-	builder.WriteString("You are an enterprise AI assistant similar to Google NotebookLM. ")
-	builder.WriteString("Answer questions strictly based on the provided context from documents.\n\n")
+	if len(sources) == 0 {
+		// 非RAG模式：纯 AI 对话，不引用文档上下文
+		builder.WriteString("You are a helpful AI assistant. ")
+		builder.WriteString("Answer questions using your general knowledge.\n\n")
+	} else {
+		// RAG 模式：基于文档检索结果回答
+		builder.WriteString("You are an enterprise AI assistant similar to Google NotebookLM. ")
+		builder.WriteString("Answer questions strictly based on the provided context from documents.\n\n")
 
-	builder.WriteString("## Instructions\n")
-	builder.WriteString("1. Answer based ONLY on the provided context\n")
-	builder.WriteString("2. When referencing information, cite the source using [Source: DocumentName, Page X]\n")
-	builder.WriteString("3. If the context is insufficient, say: 'I cannot find relevant information in the provided documents'\n")
-	builder.WriteString("4. Be concise but comprehensive\n\n")
+		builder.WriteString("## Instructions\n")
+		builder.WriteString("1. Answer based ONLY on the provided context\n")
+		builder.WriteString("2. When referencing information, cite the source using [Source: DocumentName, Page X]\n")
+		builder.WriteString("3. If the context is insufficient, say: 'I cannot find relevant information in the provided documents'\n")
+		builder.WriteString("4. Be concise but comprehensive\n\n")
+
+		builder.WriteString("## Retrieved Context\n")
+		for i, src := range sources {
+			builder.WriteString(fmt.Sprintf("[%d] Source: %s (Page %d)\nContent: %s\n\n",
+				i+1,
+				src.DocumentName,
+				src.PageNumber+1, // Convert 0-indexed to 1-indexed
+				src.Content,
+			))
+		}
+	}
 
 	builder.WriteString("## Conversation History\n")
 	if len(history) > 0 {
@@ -479,19 +543,54 @@ func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources 
 		builder.WriteString("(No previous messages)\n")
 	}
 
-	builder.WriteString("\n## Retrieved Context\n")
-	for i, src := range sources {
-		builder.WriteString(fmt.Sprintf("[%d] Source: %s (Page %d)\nContent: %s\n\n",
-			i+1,
-			src.DocumentName,
-			src.PageNumber+1, // Convert 0-indexed to 1-indexed
-			src.Content,
-		))
-	}
-
 	builder.WriteString("\n## Question\n")
 	builder.WriteString(question)
 	builder.WriteString("\n\n## Answer\n")
 
 	return builder.String()
+}
+
+// buildSourcesFromChunks 从向量检索的 chunks 中构建带文档名的 sources 列表（避免重复代码）
+func buildSourcesFromChunks(svc *notebookChatService, ctx context.Context, chunks []repository.NotebookChunk, scores []float32, userID string) []NotebookChatSource {
+	sources := make([]NotebookChatSource, 0, len(chunks))
+
+	docIDSet := make(map[string]struct{}, len(chunks))
+	for _, chunk := range chunks {
+		docIDSet[chunk.DocumentID] = struct{}{}
+	}
+	uniqueDocIDs := make([]string, 0, len(docIDSet))
+	for id := range docIDSet {
+		uniqueDocIDs = append(uniqueDocIDs, id)
+	}
+	docNameMap := svc.docRepo.GetNamesByIDs(ctx, userID, uniqueDocIDs)
+
+	for i, chunk := range chunks {
+		docName := docNameMap[chunk.DocumentID]
+		if docName == "" {
+			docName = "Unknown Document"
+		}
+		sources = append(sources, NotebookChatSource{
+			NotebookID:   chunk.NotebookID,
+			DocumentID:   chunk.DocumentID,
+			DocumentName: docName,
+			PageNumber:   chunk.PageNumber,
+			ChunkIndex:   chunk.ChunkIndex,
+			Content:      chunk.Content,
+			Score:        scores[i],
+		})
+	}
+	return sources
+}
+
+// getNotebookSourceDocumentIDs 从 NotebookChatSource 列表中提取文档 ID（用于日志）
+func getNotebookSourceDocumentIDs(sources []NotebookChatSource) []string {
+	ids := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, src := range sources {
+		if _, exists := seen[src.DocumentID]; !exists && src.DocumentID != "" {
+			ids = append(ids, src.DocumentID)
+			seen[src.DocumentID] = struct{}{}
+		}
+	}
+	return ids
 }

@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - 聊天面板组件 (核心)
+// NotebookMind - 聊天面板组件 (核心)
 // ============================================================
 
 'use client';
@@ -16,11 +16,11 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Card } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ChatMessage } from './ChatMessage';
 import { useChat, useSourceCitation } from '@/hooks/useChat';
 import { useCreateNote } from '@/hooks/useNotes';
+import { useAvailableModels } from '@/hooks/useNotebook';
 import { useNotebookStore } from '@/store/useNotebookStore';
 import type { ChatMessage as ChatMessageType, ChatSource, Session } from '@/types/api';
 
@@ -33,55 +33,8 @@ interface ChatPanelProps {
   sessionId: string | null;
   onSessionCreate?: (session: Session) => void;
   className?: string;
-}
-
-interface SuggestedQueriesProps {
-  queries: string[];
-  onQueryClick: (query: string) => void;
-  isLoading?: boolean;
-}
-
-// ============================================================
-// 建议问题组件
-// ============================================================
-
-function SuggestedQueries({ queries, onQueryClick, isLoading }: SuggestedQueriesProps) {
-  if (isLoading) {
-    return (
-      <div className="flex flex-col gap-2 p-4">
-        <Skeleton className="h-4 w-32" />
-        <div className="flex gap-2">
-          <Skeleton className="h-8 w-24" />
-          <Skeleton className="h-8 w-28" />
-          <Skeleton className="h-8 w-20" />
-        </div>
-      </div>
-    );
-  }
-
-  if (!queries || queries.length === 0) return null;
-
-  return (
-    <div className="flex flex-col gap-2 p-4 border-t bg-muted/30">
-      <p className="text-xs text-muted-foreground font-medium">Suggested Questions</p>
-      <div className="flex flex-wrap gap-2">
-        {queries.map((query, index) => (
-          <button
-            key={index}
-            onClick={() => onQueryClick(query)}
-            className={cn(
-              'px-3 py-1.5 text-sm rounded-full',
-              'bg-secondary text-secondary-foreground',
-              'hover:bg-secondary/80 transition-colors',
-              'border border-transparent hover:border-primary/20'
-            )}
-          >
-            {query}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
+  /** 从文档指南点击的建议问题（填入输入框） */
+  pendingQuery?: string | null;
 }
 
 // ============================================================
@@ -119,14 +72,23 @@ export function ChatPanel({
   sessionId,
   onSessionCreate,
   className,
+  pendingQuery,
 }: ChatPanelProps) {
   // State
   const [inputValue, setInputValue] = useState('');
-  const [suggestedQueries] = useState<string[]>([
-    '总结这篇文档的主要内容',
-    '文档中有哪些关键要点？',
-    '请解释文中的核心概念',
-  ]);
+
+  // 外部传入的建议问题（从文档指南点击）→ 自动填充输入框
+  useEffect(() => {
+    if (pendingQuery) {
+      setInputValue(pendingQuery);
+      textareaRef.current?.focus();
+    }
+  }, [pendingQuery]);
+
+  // 模型选择
+  const { models: availableModels } = useAvailableModels();
+  const selectedModel = useNotebookStore((state) => state.selectedModel);
+  const setSelectedModel = useNotebookStore((state) => state.setSelectedModel);
   // 待发送消息：用于无会话时先创建会话再自动发送
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [isCreatingSession, setIsCreatingSession] = useState(false);
@@ -280,18 +242,6 @@ export function ChatPanel({
   );
 
   // ============================================================
-  // 建议问题点击
-  // ============================================================
-
-  const handleSuggestedQueryClick = useCallback(
-    (query: string) => {
-      setInputValue(query);
-      textareaRef.current?.focus();
-    },
-    []
-  );
-
-  // ============================================================
   // 新建会话
   // ============================================================
 
@@ -317,9 +267,25 @@ export function ChatPanel({
     >
       {/* 头部 */}
       <div className="flex items-center justify-between px-4 py-3 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <MessageSquare className="w-5 h-5 text-muted-foreground" />
           <h2 className="font-semibold">AI 对话</h2>
+          {/* 模型选择器 */}
+          {availableModels.length > 1 && (
+            <select
+              value={selectedModel || ''}
+              onChange={(e) => setSelectedModel(e.target.value || null)}
+              className="text-xs bg-muted/50 border border-muted rounded-md px-2 py-1 outline-none focus:ring-1 focus:ring-primary/30"
+              title="选择 AI 模型"
+            >
+              <option value="">默认模型</option>
+              {availableModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}{m.is_default ? ' (默认)' : ''}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <Button variant="ghost" size="sm" onClick={handleNewChat}>
           <Plus className="w-4 h-4 mr-1" />
@@ -386,14 +352,6 @@ export function ChatPanel({
           </div>
         )}
       </div>
-
-      {/* 建议问题 */}
-      {showEmptyState && (
-        <SuggestedQueries
-          queries={suggestedQueries}
-          onQueryClick={handleSuggestedQueryClick}
-        />
-      )}
 
       {/* 输入区域 */}
       <div className="p-4 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">

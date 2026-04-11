@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - 文档指南组件
+// NotebookMind - 文档指南组件
 // ============================================================
 
 'use client';
@@ -143,15 +143,19 @@ function KeyPointsCard({ keyPoints, onPointClick }: KeyPointsCardProps) {
 
 interface SuggestedQueriesProps {
   documentId: string;
+  faqQuestions?: string[];
   onQueryClick?: (query: string) => void;
 }
 
-function SuggestedQueries({ documentId, onQueryClick }: SuggestedQueriesProps) {
-  const queries = [
-    '这篇文档的主要内容是什么？',
-    '有哪些关键信息需要关注？',
-    '文档中讨论了哪些重要概念？',
-  ];
+function SuggestedQueries({ documentId, faqQuestions, onQueryClick }: SuggestedQueriesProps) {
+  // 优先使用文档 FAQ 提取的问题，否则使用默认问题
+  const queries = faqQuestions && faqQuestions.length > 0
+    ? faqQuestions
+    : [
+        '这篇文档的主要内容是什么？',
+        '有哪些关键信息需要关注？',
+        '文档中讨论了哪些重要概念？',
+      ];
 
   return (
     <Card>
@@ -263,10 +267,11 @@ export const DocumentGuide = memo(function DocumentGuide({
         />
       )}
 
-      {/* 建议问题 */}
+      {/* 建议问题 — 基于文档 FAQ 动态生成 */}
       <SuggestedQueries
         documentId={documentId}
-        onQueryClick={onSuggestedQueryClick}
+        faqQuestions={parsedGuide.faq.map((item) => item.question)}
+        onSuggestedQueryClick={onSuggestedQueryClick}
       />
     </div>
   );

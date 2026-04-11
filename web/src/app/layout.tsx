@@ -3,7 +3,7 @@ import { Toaster } from 'sonner';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Enterprise PDF AI',
+  title: 'NotebookMind',
   description: 'Enterprise-grade PDF intelligence analysis platform',
 };
 

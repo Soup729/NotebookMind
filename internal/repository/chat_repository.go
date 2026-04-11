@@ -13,6 +13,7 @@ type ChatRepository interface {
 	CreateSession(ctx context.Context, session *models.ChatSession) error
 	GetSession(ctx context.Context, userID, sessionID string) (*models.ChatSession, error)
 	ListSessions(ctx context.Context, userID string) ([]models.ChatSession, error)
+	ListSessionsByNotebook(ctx context.Context, userID, notebookID string) ([]models.ChatSession, error)
 	SaveMessage(ctx context.Context, message *models.ChatMessage) error
 	ListSessionMessages(ctx context.Context, userID, sessionID string, limit int) ([]models.ChatMessage, error)
 	UpdateSessionActivity(ctx context.Context, userID, sessionID, title string, activityAt time.Time) error
@@ -60,6 +61,11 @@ func NewChatRepository(db *gorm.DB) (ChatRepository, error) {
 		return nil, fmt.Errorf("fix chat_message session_id type: %w", err)
 	}
 
+	// 修复 id 列类型：从 bigint/bigserial 改为 varchar(36)，以支持 UUID 主键
+	if err := fixChatMessageTypeIDColumn(db); err != nil {
+		return nil, fmt.Errorf("fix chat_message id type: %w", err)
+	}
+
 	if err := db.AutoMigrate(&models.ChatSession{}, &models.ChatMessage{}); err != nil {
 		return nil, fmt.Errorf("auto migrate chat tables: %w", err)
 	}
@@ -86,6 +92,29 @@ func fixChatMessageSessionIDType(db *gorm.DB) error {
 		if err := db.Exec(`ALTER TABLE "chat_messages" ALTER COLUMN "session_id" TYPE varchar(36)`).Error; err != nil {
 			return fmt.Errorf("alter session_id type: %w", err)
 		}
+	}
+	return nil
+}
+
+// fixChatMessageTypeIDColumn 将 chat_messages.id 从 bigint/bigserial 改为 varchar(36)，以支持 UUID 主键
+func fixChatMessageTypeIDColumn(db *gorm.DB) error {
+	// 检查当前列类型
+	var columnType string
+	row := db.Raw(`SELECT data_type FROM information_schema.columns
+		WHERE table_name = 'chat_messages' AND column_name = 'id'`).Row()
+	if row != nil {
+		_ = row.Scan(&columnType)
+	}
+
+	// 如果是 bigint 或 bigserial 等数值类型，则改为 varchar(36)
+	if columnType == "bigint" || columnType == "bigserial" || columnType == "integer" {
+		// PostgreSQL: 先 drop default (serial), 再改类型, 再加 NOT NULL
+		db.Exec(`ALTER TABLE "chat_messages" ALTER COLUMN "id" DROP DEFAULT`)
+		if err := db.Exec(`ALTER TABLE "chat_messages" ALTER COLUMN "id" TYPE varchar(36) USING id::varchar`).Error; err != nil {
+			return fmt.Errorf("alter chat_message id type to varchar(36): %w", err)
+		}
+		// 确保 NOT NULL 约束
+		db.Exec(`ALTER TABLE "chat_messages" ALTER COLUMN "id" SET NOT NULL`)
 	}
 	return nil
 }
@@ -138,6 +167,18 @@ func (r *chatRepository) ListSessions(ctx context.Context, userID string) ([]mod
 		Order("last_message_at desc").
 		Find(&sessions).Error; err != nil {
 		return nil, fmt.Errorf("list chat sessions: %w", err)
+	}
+	return sessions, nil
+}
+
+// ListSessionsByNotebook 查询指定笔记本下的所有会话
+func (r *chatRepository) ListSessionsByNotebook(ctx context.Context, userID, notebookID string) ([]models.ChatSession, error) {
+	var sessions []models.ChatSession
+	if err := r.db.WithContext(ctx).
+		Where("user_id = ? AND notebook_id = ?", userID, notebookID).
+		Order("last_message_at desc").
+		Find(&sessions).Error; err != nil {
+		return nil, fmt.Errorf("list sessions by notebook: %w", err)
 	}
 	return sessions, nil
 }

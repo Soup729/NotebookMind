@@ -57,7 +57,7 @@ export default function LoginPage() {
   return (
     <Card className="w-full max-w-md shadow-xl">
       <CardHeader className="space-y-1 text-center">
-        <CardTitle className="text-2xl font-bold">Enterprise PDF AI</CardTitle>
+        <CardTitle className="text-2xl font-bold">NotebookMind</CardTitle>
         <CardDescription>登录您的账户以继续</CardDescription>
       </CardHeader>
       <CardContent>

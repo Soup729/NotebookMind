@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { Loader2, Plus, FileText, MoreHorizontal, Trash2 } from 'lucide-react';
+import { Loader2, Plus, FileText, MoreHorizontal, Trash2, Pencil, Check, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -14,6 +14,10 @@ export default function NotebooksPage() {
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(true);
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
+  // 改名状态：key=notebookId
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const renameInputRef = React.useRef<HTMLInputElement>(null);
 
   // 检查登录状态
   useEffect(() => {
@@ -142,6 +146,52 @@ export default function NotebooksPage() {
     }
   };
 
+  // 改名笔记本
+  const startRename = (e: React.MouseEvent, notebookId: string, currentTitle: string) => {
+    e.stopPropagation();
+    setRenamingId(notebookId);
+    setRenameValue(currentTitle);
+    setTimeout(() => renameInputRef.current?.select(), 50);
+  };
+
+  const confirmRename = async (notebookId: string) => {
+    const trimmed = renameValue.trim();
+    if (!trimmed) { cancelRename(); return; }
+
+    const token = localStorage.getItem('auth_token');
+    if (!token) { router.replace('/login'); return; }
+
+    try {
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1'}/notebooks/${notebookId}`,
+        {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: trimmed }),
+        }
+      );
+      if (!res.ok) throw new Error('改名失败');
+
+      setNotebooks((prev) => prev.map((nb) => nb.id === notebookId ? { ...nb, title: trimmed } : nb));
+      toast.success('名称已更新');
+    } catch {
+      toast.error('改名失败');
+    } finally {
+      setRenamingId(null);
+      setRenameValue('');
+    }
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameValue('');
+  };
+
+  const handleRenameKeyDown = (e: React.KeyboardEvent, notebookId: string) => {
+    if (e.key === 'Enter') { e.preventDefault(); confirmRename(notebookId); }
+    else if (e.key === 'Escape') { cancelRename(); }
+  };
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
@@ -207,26 +257,61 @@ export default function NotebooksPage() {
             {notebooks.map((notebook) => (
               <Card
                 key={notebook.id}
-                className="cursor-pointer hover:shadow-lg transition-shadow"
+                className="cursor-pointer hover:shadow-lg transition-shadow group"
                 onClick={() => handleOpenNotebook(notebook.id)}
               >
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between">
                     <div className="flex-1 min-w-0">
-                      <CardTitle className="truncate">{notebook.title}</CardTitle>
-                      <CardDescription className="mt-1">
-                        {notebook.document_cnt} 个文档
-                      </CardDescription>
+                      {renamingId === notebook.id ? (
+                        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            ref={renameInputRef}
+                            type="text"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => handleRenameKeyDown(e, notebook.id)}
+                            onBlur={() => confirmRename(notebook.id)}
+                            className="text-base font-semibold bg-background border border-primary/50 rounded px-2 py-0.5 outline-none focus:ring-1 focus:ring-primary/30 w-full max-w-[180px]"
+                            maxLength={255}
+                            autoFocus
+                          />
+                          <button onClick={() => confirmRename(notebook.id)} className="p-0.5 hover:bg-muted rounded shrink-0" title="确认">
+                            <Check className="w-3.5 h-3.5 text-green-600" />
+                          </button>
+                          <button onClick={(e) => { e.stopPropagation(); cancelRename(); }} className="p-0.5 hover:bg-muted rounded shrink-0" title="取消">
+                            <X className="w-3.5 h-3.5 text-muted-foreground" />
+                          </button>
+                        </div>
+                      ) : (
+                        <CardTitle className="truncate">{notebook.title}</CardTitle>
+                      )}
+                      {renamingId !== notebook.id && (
+                        <CardDescription className="mt-1">
+                          {notebook.document_cnt} 个文档
+                        </CardDescription>
+                      )}
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 hover:text-destructive hover:bg-destructive/10"
-                      onClick={(e) => handleDeleteNotebook(e, notebook.id)}
-                      title="删除笔记本"
-                    >
-                      <Trash2 className="w-4 h-4 text-destructive" />
-                    </Button>
+                    {renamingId === notebook.id ? null : (
+                      <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-primary hover:bg-accent/50 rounded-md transition-colors opacity-0 group-hover:opacity-100"
+                          onClick={(e) => startRename(e, notebook.id, notebook.title)}
+                          title="重命名"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 hover:text-destructive hover:bg-destructive/10"
+                          onClick={(e) => handleDeleteNotebook(e, notebook.id)}
+                          title="删除笔记本"
+                        >
+                          <Trash2 className="w-4 h-4 text-destructive" />
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </CardHeader>
                 <CardContent>

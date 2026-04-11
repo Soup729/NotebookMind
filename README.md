@@ -1,4 +1,4 @@
-# Enterprise PDF AI
+# NotebookMind
 
 企业级多文档智能问答平台，支持 PDF 解析、混合检索、意图识别、SSE 流式响应、视觉问答 (VQA) 和 AI 反思。
 
@@ -18,18 +18,28 @@ enterprise-pdf-ai/
 │   │   └── router/       # Gin 路由配置
 │   ├── app/              # 依赖注入容器
 │   ├── models/           # 数据模型 (User, Document, ChatSession, Note 等)
+│   ├── parser/           # 结构化文档解析器 (Phase 1: PDF/OCR/表格/VLM/父子块)
+│   │   ├── types.go          # 核心类型定义（BlockType/Chunk/TableData/BoundingBox）
+│   │   ├── service.go        # ParserService 接口 + OCRProvider/VLMProvider 接口
+│   │   ├── pdf_parser.go     # PDF 文本提取、标题检测、表格解析、OCR 触发
+│   │   ├── ocr_provider.go   # RapidOCR 集成 + 降级 OCR
+│   │   ├── vlm_provider.go   # OpenAI Vision VLM 图片描述生成 + 降级
+│   │   ├── chunk_builder.go  # 父子块构建策略（Child 召回 / Parent 上下文）
+│   │   └── document_parser.go# 主编排器：串联解析→分块全流程
+│   ├── observability/    # 结构化日志与质量指标 (logging.go)
 │   ├── repository/       # 数据访问层 (PostgreSQL, Redis, Milvus)
 │   ├── service/          # 业务逻辑层
 │   └── worker/           # Asynq 异步任务处理器
-├── configs/              # 配置文件 (YAML)
+├── configs/              # 配置文件 (YAML，含 parser/ocr/vlm 配置节)
 ├── web/                  # Next.js 16 前端（独立文档 → [web/README.md](web/README.md)）
-├── scripts/              # 脚本工具 (test_notebook.ps1)
+├── scripts/              # 脚本工具 (test_notebook.ps1, notebook_eval.py)
 ├── tests/                # 测试文件
+│   └── data/             # 离线评测数据集 (eval_dataset.jsonl)
 ├── docs/                 # 项目文档
 │   ├── API.md            # OpenAPI 接口文档
 │   └── api_notebooklm.md # NotebookLM 风格接口文档
 ├── docker-compose.yaml   # PostgreSQL + Redis
-├── .env.example          # 环境变量模板
+├── .env.example          # 环境变量模板（含 Parser/OCR/VLM 配置）
 └── go.mod / go.sum       # Go 模块依赖
 ```
 
@@ -39,11 +49,17 @@ enterprise-pdf-ai/
 
 ## 后端核心能力
 
-### 1. 数据解析层
-- **Marker 模型集成**：将 PDF 转换为 Markdown/HTML
-- **表格处理**：保留表格结构
-- **坐标提取**：边界框 (x0, y0, x1, y1) 存入 Milvus 支持空间检索
-- **父子切片策略**：Child 精准检索，Parent 提供完整上下文
+### 1. 结构化文档解析层（Phase 1）
+- **PDF 文档理解**：从"纯文本抽取+字符分块"升级为结构化文档理解
+- **标题层级检测**：自动识别 H1-H6 标题，构建文档路径 (section_path)
+- **表格结构化**：自动检测表格行列、表头单元格，生成 HTML + 纯文本双格式
+- **OCR 扫描件支持**：RapidOCR 集成，文本密度低于阈值时自动触发 OCR（可配置降级）
+- **VLM 图片描述**：OpenAI Vision API 为图片块生成语义描述（可选，无配置时降级跳过）
+- **父子块策略**：
+  - **Child 块**（~300 字符）：用于向量召回，提高检索精准度
+  - **Parent 块**（~1000 字符）：用于回答上下文拼接，保证信息完整性
+- **元数据标准化**：每块携带 `document_id` / `page` / `chunk_type` / `bbox` / `section_path`
+- **降级保障**：Parser 服务不可用时自动降级到旧的纯文本提取逻辑
 
 ### 2. 检索增强层
 - **混合检索**：Dense (向量) + Sparse (BM25) 混合，权重可配
@@ -78,7 +94,7 @@ enterprise-pdf-ai/
 | 缓存 | Redis |
 | 向量库 | Milvus / Zilliz Cloud（可选，降级为 PostgreSQL 本地向量） |
 | 异步任务 | Asynq + Redis |
-| AI | OpenAI GPT-4o-mini |
+| AI | OpenAI |
 | 配置管理 | Viper (YAML) |
 
 ---
@@ -226,6 +242,46 @@ go test ./internal/repository
 go test ./internal/worker
 ```
 
+### 离线评估（LLM-as-a-Judge）
+
+使用 LLM-as-a-Judge 方法自动评估问答质量：
+
+```powershell
+# 基础运行（需先启动 API 服务）
+python scripts/notebook_eval.py --api-base http://localhost:8080/api/v1
+
+# 使用 GPT-4o 作为 Judge，输出详细报告
+$env:OPENAI_API_KEY="sk-your-key"
+python scripts/notebook_eval.py --judge-model gpt-4o -o eval_report.json
+
+# 只测 API 可用性和延迟（跳过 Judge 评估）
+python scripts/notebook_eval.py --no-judge
+```
+
+**评测维度：**
+| 指标 | 说明 | 范围 |
+|------|------|------|
+| Groundedness | 忠实度/基于上下文程度 | [0-5] |
+| Relevance | 相关性/是否针对问题 | [0-5] |
+| Completeness | 完整性/覆盖面 | [0-5] |
+| Citation Precision | 引用精确度 | [0-1] |
+| Hallucination Rate | 幻觉率 | 百分比 |
+| Recall@K | 检索召回率 | [0-1] |
+
+**在线指标采集（结构化日志）：**
+
+系统通过 `go.uber.org/zap` 在关键链路注入结构化埋点，自动采集：
+- **延迟指标**：总耗时、检索耗时、LLM 调用耗时、P95 延迟
+- **Token 用量**：Prompt Tokens、Completion Tokens、Total Tokens
+- **检索质量**：检索到的 Chunk 数量、来源文档 ID 列表
+- **错误追踪**：错误类型、错误信息、失败阶段
+
+日志事件类型：
+- `chat_request`: 完整聊天请求指标
+- `retrieval`: 检索详情
+- `llm_call`: LLM 调用记录 (generate/embed/reflection)
+- `document_processing`: 文档处理各阶段耗时
+
 ---
 
 ## 后端项目结构详解
@@ -253,7 +309,15 @@ internal/
 │   └── router/
 │       └── router.go     #   Gin 路由注册与分组
 ├── app/
-│   └── container.go      # 依赖注入容器（Wire / 手动装配）
+│   └── container.go      # 依赖注入容器（含 ParserService 初始化）
+├── parser/               # ★ Phase 1: 结构化文档解析模块 ★
+│   ├── types.go          #   核心类型 (BlockType/Chunk/TableData/BoundingBox)
+│   ├── service.go        #   ParserService/OCRProvider/VLMProvider 接口
+│   ├── pdf_parser.go     #   PDF 解析器 (标题检测/表格解析/OCR触发)
+│   ├── ocr_provider.go   #   RapidOCR 集成 + 降级 OCR
+│   ├── vlm_provider.go   #   OpenAI Vision VLM + 降级
+│   ├── chunk_builder.go  #   父子块构建策略
+│   └── document_parser.go#   主编排器
 ├── models/               # GORM 数据模型定义
 │   ├── user.go           #   用户模型
 │   ├── notebook.go       #   笔记本模型
@@ -273,8 +337,8 @@ internal/
 │   ├── note_service.go   #   笔记管理服务
 │   └── vqa_service.go    #   VQA 视觉问答服务
 └── worker/               # Asynq 异步任务
-    ├── document_processor.go  #   文档解析任务（Marker → 切片 → 向量化）
-    └── embedder.go           #   文本向量化任务
+    ├── processor.go      #   文档处理主流程 (Parser → Chunk → Index → Guide)
+    └── tasks/            #   任务类型定义
 ```
 
 ---
@@ -296,6 +360,16 @@ internal/
 | `MILVUS_ADDRESS` | Milvus 地址 | 否（留空用 PG 本地向量） |
 | `MILVUS_PASSWORD` | Milvus 密码 | 否 |
 | `SERVER_PORT` | API 服务端口 | 否（默认 8080） |
+| **Parser 解析配置** | | |
+| `PARSER_CHUNK_SIZE` | 父块最大字符数 (默认 1000) | 否 |
+| `PARSER_CHILD_CHUNK_SIZE` | 子块最大字符数 (默认 300) | 否 |
+| **OCR 配置** | | |
+| `OCR_PROVIDER` | OCR 服务类型：`rapidocr` / `fallback` (默认) | 否 |
+| `OCR_BASE_URL` | RapidOCR 服务地址 | 否 |
+| **VLM 图片描述配置** | | |
+| `VLM_ENABLED` | 启用 VLM 图片描述生成 | 否 |
+| `VLM_API_KEY` | VLM API Key (默认复用 OPENAI_API_KEY) | 否 |
+| `VLM_MODEL` | VLM 模型名称 (默认 gpt-4o-mini) | 否 |
 
 ### 数据库迁移
 
@@ -307,24 +381,3 @@ PostgreSQL 表结构由 GORM AutoMigrate 自动管理，首次启动时自动创
 
 ---
 
-## Git 工作流
-
-### 合并到 main
-
-```bash
-# 1. 确保所有测试通过
-.\scripts\test_notebook.ps1 -ApiBase "http://localhost:8080/api/v1"
-
-# 2. 提交当前分支的更改
-git add .
-git commit -m "feat: 描述你的改动"
-
-# 3. 切换到 main 分支
-git checkout main
-
-# 4. 合并功能分支
-git merge <分支名>
-
-# 5. 推送 main 分支
-git push origin main
-```

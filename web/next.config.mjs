@@ -3,20 +3,12 @@ const nextConfig = {
   reactStrictMode: true,
 
   // ============================================================
-  // Turbopack 配置（Next.js 16 默认使用 Turbopack）
-  // 替代原 webpack 配置，编译速度提升 5-10x
+  // Turbopack — Next.js 16 默认启用，webpack 配置仍用于生产构建
   // ============================================================
-  turbopack: {
-    // 解析别名 — 替代 webpack resolve.alias
-    resolveAlias: {
-      // pdfjs-dist 的 Node.js 内置模块在浏览器端的 polyfill
-      // 等同于 webpack 的 resolve.fallback: { fs: false, path: false, crypto: false }
-    },
-  },
+  turbopack: {},
 
   // ============================================================
-  // Server Components 外部包配置
-  // 解决 pdfjs-dist 等 Node.js 模块在 SSR/客户端的兼容性问题
+  // Server Components 外部包（解决 SSR 兼容性）
   // ============================================================
   serverExternalPackages: [
     'pdfjs-dist',
@@ -26,7 +18,6 @@ const nextConfig = {
 
   // 编译优化
   compiler: {
-    // 移除 console.log（生产环境）
     removeConsole: process.env.NODE_ENV === 'production',
   },
 
@@ -35,28 +26,44 @@ const nextConfig = {
     buildActivity: false,
   },
 
-  // 缓存优化 - 网络驱动器加速
-  ...(process.env.NEXT_DEV_CACHE_DIR ? {
-    cacheHandler: process.env.NEXT_DEV_CACHE_DIR,
-    cacheMaxMemorySize: 0,
-  } : {}),
-
   // ============================================================
-  // Webpack 兼容层（保留用于生产构建和 fallback 场景）
-  // 开发环境优先使用 Turbopack，生产构建仍走 webpack
+  // Webpack（仅生产构建 + fallback）
   // ============================================================
   webpack: (config, { dev }) => {
     if (dev) {
+      // 网络驱动器启用 polling 模式（更可靠但略耗 CPU）
+      const isNetworkDrive = process.cwd().startsWith('F') || process.cwd().startsWith('f');
       config.watchOptions = {
         ...config.watchOptions,
         ignored: ['**/node_modules/**', '**/.next/**'],
         aggregateTimeout: 300,
-        poll: false,
+        poll: isNetworkDrive ? 1000 : false,
       };
     }
 
-    // 解决 pdfjs-dist 在 SSR 下的兼容性问题
-    // Turbopack 不读取此配置，仅 webpack 构建时生效
+    // 生产构建优化
+    if (!dev) {
+      config.optimization.splitChunks = {
+        ...config.optimization.splitChunks,
+        chunks: 'all',
+        cacheGroups: {
+          vendor: {
+            test: /[\\/]node_modules[\\/]/,
+            name: 'vendors',
+            priority: 10,
+            reuseExistingChunk: true,
+          },
+          pdf: {
+            test: /[\\/]node_modules[\\/](pdfjs-dist|react-pdf)[\\/]/,
+            name: 'pdf',
+            priority: 20,
+            reuseExistingChunk: true,
+          },
+        },
+      };
+    }
+
+    // pdfjs-dist SSR 兼容（Turbopack 不读取此配置）
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,

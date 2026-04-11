@@ -1,4 +1,4 @@
-﻿# Enterprise PDF AI - API 功能验证脚本 (PowerShell)
+﻿# NotebookMind - API 功能验证脚本 (PowerShell)
 # 使用方法: .\scripts\test_notebook.ps1 -ApiBase "http://localhost:8080/api/v1"
 
 param(
@@ -752,7 +752,7 @@ function Test-DeleteDocument {
 
 function Main {
     Write-Host "==========================================" -ForegroundColor Cyan
-    Write-Host "  Enterprise PDF AI - 全功能验证测试" -ForegroundColor Cyan
+    Write-Host "  NotebookMind - 全功能验证测试" -ForegroundColor Cyan
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host ""
 

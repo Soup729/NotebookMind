@@ -25,10 +25,11 @@ import (
 type ModelProvider string
 
 const (
-	ProviderOpenAI       ModelProvider = "openai"
-	ProviderAnthropic    ModelProvider = "anthropic"
-	ProviderGemini       ModelProvider = "gemini"
-	ProviderAzureOpenAI  ModelProvider = "azure-openai"
+	ProviderOpenAI      ModelProvider = "openai"
+	ProviderAnthropic   ModelProvider = "anthropic"
+	ProviderGemini      ModelProvider = "gemini"
+	ProviderAzureOpenAI ModelProvider = "azure-openai"
+	ProviderCustom      ModelProvider = "custom"
 )
 
 // RetrievalOptions contains options for context retrieval
@@ -52,7 +53,6 @@ type LLMService interface {
 	DeleteDocumentChunks(ctx context.Context, userID, documentID string) error
 	GenerateAnswer(ctx context.Context, prompt string) (*GeneratedAnswer, error)
 	GenerateAnswerWithProvider(ctx context.Context, prompt string, provider ModelProvider) (*GeneratedAnswer, error)
-	GenerateRecommendedQuestions(ctx context.Context, context string, count int) ([]string, error)
 	GenerateReflection(ctx context.Context, question, answer string, sources []string) (*ReflectionResult, error)
 	AnswerWithImage(ctx context.Context, question string, imageData []byte, mimeType string) (*GeneratedAnswer, error)
 }
@@ -110,19 +110,37 @@ func NewLLMService(ctx context.Context, db *gorm.DB, llmCfg *configs.LLMConfig, 
 			openai.WithModel(llmCfg.Providers.OpenAI.ChatModel),
 		)
 	case "anthropic":
-		// Anthropic uses different SDK, fall back to OpenAI-compatible API if available
+		baseURL := llmCfg.Providers.Anthropic.BaseURL
+		if baseURL == "" {
+			baseURL = "https://api.anthropic.com/v1"
+		}
 		chatClient, err = openai.New(
 			openai.WithToken(llmCfg.Providers.Anthropic.APIKey),
-			openai.WithBaseURL("https://api.anthropic.com/v1"),
+			openai.WithBaseURL(baseURL),
 			openai.WithModel(llmCfg.Providers.Anthropic.ChatModel),
 		)
 	case "gemini":
-		// Gemini uses OpenAI-compatible API
+		baseURL := llmCfg.Providers.Gemini.BaseURL
+		if baseURL == "" {
+			baseURL = "https://generativelanguage.googleapis.com"
+		}
 		chatClient, err = openai.New(
 			openai.WithToken(llmCfg.Providers.Gemini.APIKey),
-			openai.WithBaseURL(llmCfg.Providers.Gemini.BaseURL+"/v1"),
+			openai.WithBaseURL(baseURL+"/v1"),
 			openai.WithModel(llmCfg.Providers.Gemini.ChatModel),
 		)
+	case "custom":
+		// Custom: use first configured custom model as default
+		if len(llmCfg.Providers.CustomModels) > 0 && strings.TrimSpace(llmCfg.Providers.CustomModels[0].APIKey) != "" {
+			cm := llmCfg.Providers.CustomModels[0]
+			chatClient, err = openai.New(
+				openai.WithToken(cm.APIKey),
+				openai.WithBaseURL(cm.BaseURL),
+				openai.WithModel(cm.ChatModel),
+			)
+		} else {
+			return nil, fmt.Errorf("no custom model configured with valid API key")
+		}
 	default:
 		return nil, fmt.Errorf("unsupported LLM provider: %s", defaultProvider)
 	}
@@ -199,20 +217,55 @@ func (s *llmService) GenerateAnswerWithProvider(ctx context.Context, prompt stri
 			openai.WithModel(s.cfg.Providers.OpenAI.ChatModel),
 		)
 	case ProviderAnthropic:
-		// Use OpenAI-compatible endpoint with Anthropic model
+		baseURL := s.cfg.Providers.Anthropic.BaseURL
+		if baseURL == "" {
+			baseURL = "https://api.anthropic.com/v1"
+		}
 		client, err = openai.New(
 			openai.WithToken(s.cfg.Providers.Anthropic.APIKey),
-			openai.WithBaseURL(s.cfg.Providers.Anthropic.BaseURL),
+			openai.WithBaseURL(baseURL),
 			openai.WithModel(s.cfg.Providers.Anthropic.ChatModel),
 		)
 	case ProviderGemini:
+		baseURL := s.cfg.Providers.Gemini.BaseURL
+		if baseURL == "" {
+			baseURL = "https://generativelanguage.googleapis.com"
+		}
 		client, err = openai.New(
 			openai.WithToken(s.cfg.Providers.Gemini.APIKey),
-			openai.WithBaseURL(s.cfg.Providers.Gemini.BaseURL+"/v1"),
+			openai.WithBaseURL(baseURL+"/v1"),
 			openai.WithModel(s.cfg.Providers.Gemini.ChatModel),
 		)
+	case ProviderCustom:
+		// Custom model: fallback to first configured, or default provider
+		if len(s.cfg.Providers.CustomModels) > 0 {
+			cm := s.cfg.Providers.CustomModels[0]
+			client, err = openai.New(
+				openai.WithToken(cm.APIKey),
+				openai.WithBaseURL(cm.BaseURL),
+				openai.WithModel(cm.ChatModel),
+			)
+		} else {
+			client = s.llm
+		}
 	default:
-		client = s.llm // fallback to default
+		// Try to match as custom model ID (e.g., "custom:deepseek")
+		if strings.HasPrefix(string(provider), "custom:") {
+			customID := strings.TrimPrefix(string(provider), "custom:")
+			for _, cm := range s.cfg.Providers.CustomModels {
+				if cm.ID == customID && strings.TrimSpace(cm.APIKey) != "" {
+					client, err = openai.New(
+						openai.WithToken(cm.APIKey),
+						openai.WithBaseURL(cm.BaseURL),
+						openai.WithModel(cm.ChatModel),
+					)
+					break
+				}
+			}
+		}
+		if client == nil && err == nil {
+			return nil, fmt.Errorf("unknown provider/model: %s", provider)
+		}
 	}
 
 	if err != nil {
@@ -237,58 +290,6 @@ func (s *llmService) GenerateAnswerWithProvider(ctx context.Context, prompt stri
 		CompletionTokens: completionTokens,
 		TotalTokens:      promptTokens + completionTokens,
 	}, nil
-}
-
-// GenerateRecommendedQuestions generates suggested questions based on context
-func (s *llmService) GenerateRecommendedQuestions(ctx context.Context, context string, count int) ([]string, error) {
-	if count <= 0 {
-		count = 3
-	}
-	if count > 5 {
-		count = 5
-	}
-
-	prompt := fmt.Sprintf(`Based on the following context, generate %d recommended questions that a user might want to ask.
-Return ONLY a JSON array of strings, no other text.
-
-Context:
-%s
-
-Output format: ["question 1", "question 2", "question 3"]`, count, context)
-
-	response, err := llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("generate recommended questions: %w", err)
-	}
-
-	// Parse JSON array from response
-	text := strings.TrimSpace(response)
-	text = strings.TrimPrefix(text, "```json")
-	text = strings.TrimSuffix(text, "```")
-	text = strings.Trim(text, "[]\" \n")
-
-	// Simple parsing for ["q1", "q2", ...]
-	var questions []string
-	parts := strings.Split(text, "\",\"")
-	if len(parts) > 0 {
-		for _, p := range parts {
-			p = strings.Trim(p, "[]\" \n")
-			if p != "" {
-				questions = append(questions, p)
-			}
-		}
-	}
-
-	if len(questions) == 0 {
-		// Fallback: return default questions
-		questions = []string{
-			"Can you summarize the key points?",
-			"What are the main conclusions?",
-			"Can you explain this in more detail?",
-		}
-	}
-
-	return questions[:count], nil
 }
 
 // GenerateReflection analyzes the answer and provides feedback

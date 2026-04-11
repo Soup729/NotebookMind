@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - 工具库
+// NotebookMind - 工具库
 // ============================================================
 
 import { type ClassValue, clsx } from 'clsx';
@@ -42,6 +42,9 @@ export const API_ENDPOINTS = {
   sessionMessages: (sessionId: string) => `/chat/sessions/${sessionId}/messages`,
   chat: (notebookId: string, sessionId: string) =>
     `/notebooks/${notebookId}/sessions/${sessionId}/chat`,
+
+  // 模型
+  models: '/chat/models',
 
   // 搜索
   search: (notebookId: string) => `/notebooks/${notebookId}/search`,
@@ -197,11 +200,19 @@ export async function streamChat(
           }
 
           try {
-            const parsed: SSEChunk = JSON.parse(data);
+            const parsed = JSON.parse(data);
+
+            // 检测后端通过 SSE 发送的错误事件
+            if (parsed.error) {
+              const sseErr = new Error(parsed.detail || parsed.error);
+              onError?.(sseErr);
+              throw sseErr;
+            }
+
             accumulatedContent = parsed.content;
-            onChunk?.(parsed);
+            onChunk?.(parsed as SSEChunk);
           } catch {
-            // 忽略解析错误
+            // 忽略非标准格式数据（已由上方 error 检测处理）
           }
         }
       }

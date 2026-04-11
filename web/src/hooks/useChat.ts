@@ -1,5 +1,5 @@
 // ============================================================
-// Enterprise PDF AI - 聊天 SSE Hook
+// NotebookMind - 聊天 SSE Hook
 // ============================================================
 
 'use client';
@@ -77,28 +77,33 @@ export function useChat(notebookId: string, sessionId: string | null): UseChatRe
       }
 
       try {
+        console.debug('[useChat] Loading history for session:', sessionId);
         const data = await apiFetch<{ items: ChatMessage[] }>(
           API_ENDPOINTS.sessionMessages(sessionId),
           { token }
         );
 
         if (!cancelled) {
-          setMessages(data.items || []);
+          const msgs = data.items || [];
+          console.debug('[useChat] Loaded', msgs.length, 'messages for session:', sessionId);
+          setMessages(msgs);
           setIsLoadingHistory(false);
         }
       } catch (err) {
         if (!cancelled) {
           const msg = err instanceof Error ? err.message : String(err);
-          // 新建的会话可能还没有历史记录，后端可能返回 not found / session not found
-          // 这种情况属于正常现象，静默处理为空消息列表
+          // 新建会话无历史属于正常现象 — 精确匹配 "not found" + "session" 组合，
+          // 避免误匹配其他包含 "session" 或 "not found" 的错误（如网络错误、权限错误等）
+          const lowerMsg = msg.toLowerCase();
           const isNewSessionError =
-            msg.toLowerCase().includes('not found') ||
-            msg.toLowerCase().includes('session');
+            (lowerMsg.includes('not found') && lowerMsg.includes('session')) ||
+            lowerMsg === 'http 404';
           if (isNewSessionError) {
-            console.debug('新建会话无历史记录:', msg);
+            console.debug('[useChat] New session, no history:', sessionId);
             setMessages([]);
           } else {
-            console.error('Failed to load messages:', err);
+            console.error('[useChat] Failed to load messages:', err);
+            toast.error('加载对话记录失败', { description: msg });
             setMessages([]);
           }
           setIsLoadingHistory(false);
