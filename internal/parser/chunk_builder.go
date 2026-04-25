@@ -2,6 +2,9 @@ package parser
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -71,7 +74,7 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 				Metadata:       map[string]any{"heading_level": fmt.Sprintf("%d", block.HeadingLevel)},
 			}
 			parentChunks = append(parentChunks, titleChunk)
-			
+
 			// 子块用于召回
 			childChunks = append(childChunks, &Chunk{
 				ID:             uuid.NewString(),
@@ -88,7 +91,7 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 			})
 			childIndex++
 			parentIndex++
-			
+
 			parentPageNum = block.PageNum
 			parentBBox = block.BBox
 			parentSectionPath = block.SectionPath
@@ -132,7 +135,7 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 				Metadata: map[string]any{
 					"table_rows":    fmt.Sprintf("%d", rowCount),
 					"table_columns": fmt.Sprintf("%d", colCount),
-					"chunk_role":     "parent",
+					"chunk_role":    "parent",
 				},
 			}
 			parentChunks = append(parentChunks, tableParent)
@@ -158,8 +161,43 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 			continue
 		}
 
-		// 图片块：跳过（图片描述已通过 VLM 处理）
+		// 图片块：生成父+子块（使用 VLM 描述或占位文本）
 		if block.Type == BlockTypeImage {
+			imageContent, imageMetadata := b.buildVisualChunkContent(block, documentID)
+
+			if strings.TrimSpace(imageContent) == "" {
+				continue
+			}
+
+			imageParent := &Chunk{
+				ID:             uuid.NewString(),
+				Content:        imageContent,
+				DocumentID:     documentID,
+				UserID:         userID,
+				PageNum:        block.PageNum,
+				ChunkIndex:     parentIndex,
+				ChunkType:      BlockTypeImage,
+				BBox:           block.BBox,
+				SourceBlockIDs: []string{block.ID},
+				Metadata:       imageMetadata.withRole("parent"),
+			}
+			parentChunks = append(parentChunks, imageParent)
+
+			childChunks = append(childChunks, &Chunk{
+				ID:             uuid.NewString(),
+				ParentID:       imageParent.ID,
+				Content:        imageContent,
+				DocumentID:     documentID,
+				UserID:         userID,
+				PageNum:        block.PageNum,
+				ChunkIndex:     childIndex,
+				ChunkType:      BlockTypeImage,
+				BBox:           block.BBox,
+				SourceBlockIDs: []string{block.ID},
+				Metadata:       imageMetadata.withRole("child"),
+			})
+			childIndex++
+			parentIndex++
 			continue
 		}
 
@@ -198,12 +236,115 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 		pChunk := b.createParentChunk(content, userID, documentID,
 			parentIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 		parentChunks = append(parentChunks, pChunk)
-		
+
 		children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType)
 		childChunks = append(childChunks, children...)
 	}
 
 	return parentChunks, childChunks
+}
+
+type visualMetadata map[string]any
+
+func (m visualMetadata) withRole(role string) map[string]any {
+	out := make(map[string]any, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	out["chunk_role"] = role
+	return out
+}
+
+func (b *ChunkBuilder) buildVisualChunkContent(block StructuredBlock, documentID string) (string, visualMetadata) {
+	metadata := visualMetadata{}
+	imageContent := strings.TrimSpace(block.Content)
+	visualType := "image"
+
+	if block.ImageData != nil {
+		if block.ImageData.VisualType != "" {
+			visualType = block.ImageData.VisualType
+		}
+		if strings.TrimSpace(block.ImageData.Caption) != "" {
+			imageContent = strings.TrimSpace(block.ImageData.Caption)
+		}
+		if b.config.SaveVisualRegions && block.ImageData.VisualPath == "" && len(block.ImageData.ImageBytes) > 0 {
+			if path, err := b.persistVisualRegion(documentID, block.ID, block.PageNum, block.ImageData); err == nil {
+				block.ImageData.VisualPath = path
+			}
+		}
+		if block.ImageData.VisualPath != "" {
+			metadata["visual_path"] = block.ImageData.VisualPath
+		}
+		if block.ImageData.VisualJSON != "" {
+			metadata["visual_json"] = block.ImageData.VisualJSON
+		}
+	}
+
+	if imageContent == "" {
+		imageContent = fmt.Sprintf("Image evidence on page %d.", block.PageNum)
+	}
+	metadata["image_caption"] = imageContent
+	metadata["visual_type"] = visualType
+
+	var builder strings.Builder
+	builder.WriteString("[Visual: ")
+	builder.WriteString(visualType)
+	builder.WriteString("]\n")
+	builder.WriteString("Summary: ")
+	builder.WriteString(imageContent)
+	builder.WriteString("\n")
+	if path, ok := metadata["visual_path"].(string); ok && path != "" {
+		builder.WriteString("VisualPath: ")
+		builder.WriteString(path)
+		builder.WriteString("\n")
+	}
+	if raw, ok := metadata["visual_json"].(string); ok && raw != "" {
+		builder.WriteString("VisualJSON: ")
+		builder.WriteString(raw)
+		builder.WriteString("\n")
+	}
+
+	return strings.TrimSpace(builder.String()), metadata
+}
+
+func (b *ChunkBuilder) persistVisualRegion(documentID, blockID string, pageNum int, img *ImageData) (string, error) {
+	root := strings.TrimSpace(b.config.VisualStorageRoot)
+	if root == "" {
+		root = "storage/visual"
+	}
+	ext := ".bin"
+	switch strings.ToLower(img.MimeType) {
+	case "image/png":
+		ext = ".png"
+	case "image/jpeg", "image/jpg":
+		ext = ".jpg"
+	case "image/webp":
+		ext = ".webp"
+	}
+	if pageNum <= 0 {
+		pageNum = img.PageIndex + 1
+	}
+	safeDocID := safePathSegment(documentID)
+	safeBlockID := safePathSegment(blockID)
+	dir := filepath.Join(root, safeDocID, fmt.Sprintf("page-%d", pageNum))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%s%s", safeBlockID, ext))
+	if err := os.WriteFile(path, img.ImageBytes, 0644); err != nil {
+		return "", err
+	}
+	return filepath.Clean(path), nil
+}
+
+var unsafePathSegment = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+func safePathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return uuid.NewString()
+	}
+	return unsafePathSegment.ReplaceAllString(value, "_")
 }
 
 // createParentChunk 创建父 chunk
@@ -230,15 +371,15 @@ func (b *ChunkBuilder) createChildChunks(parentContent, userID, documentID, pare
 
 	if totalRunes <= b.config.ChildChunkSize {
 		return []*Chunk{{
-			ID:             uuid.NewString(),
-			ParentID:       parentID,
-			Content:        parentContent,
-			DocumentID:     documentID,
-			UserID:         userID,
-			PageNum:        pageNum,
-			ChunkIndex:     startIdx,
-			ChunkType:      chunkType,
-			Metadata:       map[string]any{"chunk_role": "child"},
+			ID:         uuid.NewString(),
+			ParentID:   parentID,
+			Content:    parentContent,
+			DocumentID: documentID,
+			UserID:     userID,
+			PageNum:    pageNum,
+			ChunkIndex: startIdx,
+			ChunkType:  chunkType,
+			Metadata:   map[string]any{"chunk_role": "child"},
 		}}
 	}
 
@@ -280,11 +421,11 @@ func (b *ChunkBuilder) createChildChunks(parentContent, userID, documentID, pare
 // ToMetadata 将 parent chunk 转为标准化的 metadata map（供向量库使用）
 func (c *Chunk) ToMetadata() map[string]any {
 	metadata := map[string]any{
-		"user_id":         c.UserID,
-		"document_id":     c.DocumentID,
-		"page_num":        c.PageNum,
-		"chunk_index":     c.ChunkIndex,
-		"chunk_type":      string(c.ChunkType),
+		"user_id":          c.UserID,
+		"document_id":      c.DocumentID,
+		"page_num":         c.PageNum,
+		"chunk_index":      c.ChunkIndex,
+		"chunk_type":       string(c.ChunkType),
 		"source_block_ids": c.SourceBlockIDs,
 	}
 	if c.ParentID != "" {

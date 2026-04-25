@@ -1,8 +1,12 @@
 package parser
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 
@@ -35,22 +39,46 @@ func (r *RapidOCRProvider) IsAvailable() bool {
 	return r.available
 }
 
+// rapidOCRResponse RapidOCR HTTP 服务的标准响应格式
+type rapidOCRResponse struct {
+	Code    int                    `json:"code"`
+	Message string                 `json:"message"`
+	Data    []rapidOCRResultItem   `json:"data,omitempty"`
+	Result  []rapidOCRResultItem   `json:"result,omitempty"` // 兼容不同版本
+}
+
+type rapidOCRResultItem struct {
+	Text         string    `json:"text"`
+	Box          []float64 `json:"box,omitempty"`
+	Confidence   float64   `json:"confidence,omitempty"`
+}
+
 // RecognizePage 调用 RapidOCR 服务识别图片中的文字
 func (r *RapidOCRProvider) RecognizePage(ctx context.Context, imageBytes []byte, mimeType string) (string, error) {
 	if !r.available {
 		return "", fmt.Errorf("RapidOCR service is not configured")
 	}
 
-	url := r.BaseURL + "/ocr"
+	// 构建 multipart/form-data 请求
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	// 写入图片文件字段
+	part, err := writer.CreateFormFile("file", "page."+fileExtFromMime(mimeType))
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(imageBytes); err != nil {
+		return "", fmt.Errorf("write image bytes: %w", err)
+	}
+	writer.Close()
+
+	url := r.BaseURL + "/ocr"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
 	if err != nil {
 		return "", fmt.Errorf("create ocr request: %w", err)
 	}
-	req.Header.Set("Content-Type", mimeType)
-	if req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Content-Type", "image/jpeg")
-	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := r.HTTPClient.Do(req)
@@ -60,17 +88,57 @@ func (r *RapidOCRProvider) RecognizePage(ctx context.Context, imageBytes []byte,
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("rapidocr returned status %d", resp.StatusCode)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read rapidocr response: %w", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("rapidocr returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// 解析响应
+	var ocrResp rapidOCRResponse
+	if err := json.Unmarshal(respBody, &ocrResp); err != nil {
+		return "", fmt.Errorf("parse rapidocr response: %w", err)
+	}
+
+	// 提取文本（兼容 data 和 result 两种字段名）
+	items := ocrResp.Data
+	if len(items) == 0 {
+		items = ocrResp.Result
+	}
+
+	var textBuilder strings.Builder
+	for i, item := range items {
+		if i > 0 {
+			textBuilder.WriteString("\n")
+		}
+		textBuilder.WriteString(item.Text)
+	}
+
+	result := strings.TrimSpace(textBuilder.String())
 	zap.L().Debug("rapidocr recognition completed",
 		zap.Int("status", resp.StatusCode),
+		zap.Int("text_items", len(items)),
+		zap.Int("result_len", len(result)),
 	)
 
-	// 框架预留：实际集成需根据 RapidOCR API 响应格式解码 JSON
-	// 当前返回空字符串，由调用方降级处理
-	return "", fmt.Errorf("rapidocr integration requires response body parsing - framework placeholder")
+	return result, nil
+}
+
+// fileExtFromMime 根据 MIME 类型返回文件扩展名
+func fileExtFromMime(mimeType string) string {
+	switch strings.ToLower(mimeType) {
+	case "image/png":
+		return "png"
+	case "image/gif":
+		return "gif"
+	case "image/webp":
+		return "webp"
+	default:
+		return "jpg"
+	}
 }
 
 // FallbackOCRProvider 降级 OCR 提供者（不执行实际 OCR）

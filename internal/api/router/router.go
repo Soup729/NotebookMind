@@ -87,12 +87,26 @@ func New(
 		protected.GET("/notebooks/:id/sessions", notebookHandler.ListSessions)
 		protected.POST("/notebooks/:id/sessions", notebookHandler.CreateSession)
 		protected.DELETE("/notebooks/:id/sessions/:sessionId", notebookHandler.DeleteSession)
+		protected.GET("/notebooks/:id/sessions/:sessionId/memory", notebookHandler.GetSessionMemory)
+		protected.POST("/notebooks/:id/sessions/:sessionId/memory/refresh", notebookHandler.RefreshSessionMemory)
+		protected.DELETE("/notebooks/:id/sessions/:sessionId/memory", notebookHandler.ClearSessionMemory)
 
 		// Notebook Streaming Chat
 		protected.POST("/notebooks/:id/sessions/:sessionId/chat", notebookHandler.StreamChat)
 
 		// Notebook Search
 		protected.POST("/notebooks/:id/search", notebookHandler.SearchNotebook)
+
+		// Notebook Research Artifacts
+		protected.GET("/notebooks/:id/artifacts", notebookHandler.ListArtifacts)
+		protected.POST("/notebooks/:id/artifacts/generate", notebookHandler.GenerateArtifact)
+		protected.GET("/notebooks/:id/artifacts/:artifactId", notebookHandler.GetArtifact)
+		protected.DELETE("/notebooks/:id/artifacts/:artifactId", notebookHandler.DeleteArtifact)
+
+		// Notebook Export Artifacts
+		protected.POST("/notebooks/:id/exports/outline", notebookHandler.CreateExportOutline)
+		protected.POST("/notebooks/:id/exports/:artifactId/confirm", notebookHandler.ConfirmExport)
+		protected.GET("/notebooks/:id/exports/:artifactId/download", notebookHandler.DownloadExport)
 
 		// Notes (Research Notes)
 		protected.GET("/notes", noteHandler.List)

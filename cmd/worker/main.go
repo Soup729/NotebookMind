@@ -41,7 +41,7 @@ func main() {
 	}
 	defer container.TaskProducer.Close()
 
-	processor := worker.NewDocumentProcessor(container.LLMService, container.DocumentRepository, container.NotebookService, container.ParserService)
+	processor := worker.NewDocumentProcessor(container.LLMService, container.DocumentRepository, container.NotebookService, container.NotebookExportService, container.ParserService, container.BM25Index)
 	mux := asynq.NewServeMux()
 	processor.RegisterHandlers(mux)
 
@@ -55,6 +55,7 @@ func main() {
 			Concurrency: cfg.Asynq.Concurrency,
 			Queues: map[string]int{
 				"documents": 10,
+				"exports":   3,
 			},
 		},
 	)

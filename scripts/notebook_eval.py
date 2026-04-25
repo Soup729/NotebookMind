@@ -177,7 +177,7 @@ def load_dataset(path: str) -> List[EvalItem]:
                     id=data.get('id', f'item-{line_num}'),
                     category=data.get('category', 'unknown'),
                     question=data.get('question', ''),
-                    expected_answer=data.get('expected_answer', ''),
+                    expected_answer=data.get('expected_answer', data.get('expectedAnswer', '')),
                     expected_sources=data.get('expected_sources', []),
                     difficulty=data.get('difficulty', 'medium'),
                     tags=data.get('tags', []),
@@ -190,6 +190,21 @@ def load_dataset(path: str) -> List[EvalItem]:
     return items
 
 
+def conversation_questions(item: EvalItem) -> List[str]:
+    """Return the user questions that should be replayed for one eval item."""
+    if item.turns:
+        questions = [
+            str(turn.get("content", "")).strip()
+            for turn in item.turns
+            if turn.get("role") == "user" and str(turn.get("content", "")).strip()
+        ]
+        if questions:
+            return questions
+
+    question = (item.question or "").strip()
+    return [question] if question else []
+
+
 class APIClient:
     """NotebookMind API 客户端"""
 
@@ -198,6 +213,7 @@ class APIClient:
         self.token = token
         self.session_id: Optional[str] = None
         self.notebook_id: Optional[str] = None
+        self.document_ids: List[str] = []  # 当前笔记本下的文档 ID 列表
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -216,7 +232,8 @@ class APIClient:
 
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                return json.loads(resp.read().decode())
+                raw = resp.read().decode()
+                return json.loads(raw) if raw.strip() else {}
         except urllib.error.HTTPError as e:
             error_body = e.read().decode() if e.fp else ""
             raise Exception(f"HTTP {e.code}: {error_body}") from e
@@ -326,58 +343,141 @@ class APIClient:
         resp = self._request("GET", "/documents")
         return resp.get("items", [])
 
-    def wait_for_documents(self, timeout: int = 120) -> bool:
-        """轮询等待所有文档处理完成，返回是否全部成功"""
+    def wait_for_documents(self, timeout: int = 120, auto_cleanup: bool = True) -> bool:
+        """轮询等待所有文档处理完成，返回是否全部成功
+        
+        Args:
+            timeout: 总超时时间（秒）
+            auto_cleanup: 是否自动清理卡住超过 60 秒的旧文档
+        """
         start = time.time()
         first_check = True
+        last_doc_count = 0
+        unchanged_count = 0  # 连续 N 轮文档数量不变 → 可能卡死
+        
         while time.time() - start < timeout:
             docs = self.list_documents()
+            
             if not docs:
                 if first_check:
                     print(f"      文档列表为空，等待中...")
                     first_check = False
-                time.sleep(2)
+                time.sleep(3)
                 continue
-            statuses = [d.get("status") or d.get("Status", "unknown") for d in docs]
+            
+            statuses = []
+            for d in docs:
+                s = d.get("status") or d.get("Status", "unknown")
+                statuses.append(s)
+            
             completed = sum(1 for s in statuses if s == "completed")
             failed = sum(1 for s in statuses if s == "failed")
             processing = sum(1 for s in statuses if s == "processing")
-
-            # 收集失败文档的详情
+            
+            # 收集各状态文档的详情
             failed_docs = []
+            processing_docs = []
             for d, s in zip(docs, statuses):
+                fname = d.get("file_name") or d.get("FileName") or d.get("filename", "?")
+                did = d.get("ID") or d.get("id", "?")
+                info = f"  - {fname} ({did[:8]}...)"
                 if s == "failed":
-                    fname = d.get("file_name") or d.get("FileName") or d.get("filename", "?")
-                    did = d.get("ID") or d.get("id", "?")
-                    failed_docs.append(f"  - {fname} ({did[:8]}...)")
+                    failed_docs.append(info)
+                elif s == "processing":
+                    processing_docs.append(info)
 
-            print(f"      文档状态: {completed} 已完成, {processing} 处理中, {failed} 失败 / 共 {len(statuses)}")
+            elapsed = int(time.time() - start)
+            print(f"      [{elapsed}s] 状态: {completed} 完成 | {processing} 处理中 | {failed} 失败 / 共 {len(statuses)}")
 
-            # 有失败 → 立即报错退出，不再等待
+            # 有失败但仍有文档在处理时，可能是 Asynq 正在重试，不要立刻进入无来源评测。
             if failed > 0:
-                print("\n      [ERROR] 文档处理失败！可能原因：")
-                print("             1. milvus 未配置或未启动（config.yaml → milvus.address）")
-                print("             2. LLM API Key 未设置（config.yaml → llm.providers.openai.api_key）")
+                if processing > 0 and elapsed < min(timeout, 90):
+                    print("      [WARN] 检测到失败状态，但仍有任务处理中，等待 Worker 重试...")
+                    time.sleep(5)
+                    first_check = False
+                    continue
+                print("\n      [ERROR] 文档处理失败！")
+                print("             可能原因:")
+                print("             1. Milvus 未配置或未启动（config.yaml → milvus.address）")
+                print("             2. LLM API Key 无效（config.yaml → llm.providers.openai.api_key）")
                 print("             3. Worker 进程未运行（需执行: go run ./cmd/worker）")
                 print("             4. Redis 未连接（asynq 队列依赖 Redis）")
-                print(f"\n      失败的文档:")
+                print(f"\n      失败的文档 ({len(failed_docs)}):")
                 for fd in failed_docs:
                     print(fd)
+                
+                # 也打印正在处理的，可能有线索
+                if processing_docs:
+                    print(f"\n      仍在处理的文档 ({len(processing_docs)}):")
+                    for pd in processing_docs:
+                        print(pd)
                 return False
-
+            
+            # 全部完成
             if processing == 0 and completed > 0:
-                print(f"      全部 {completed} 个文档处理完成 ✓")
+                print(f"\n      全部 {completed} 个文档处理完成 ✓")
+                # 收集文档 ID 列表用于 RAG 检索
+                self.document_ids = [d.get("ID") or d.get("id", "") for d in docs
+                                     if (d.get("status") or d.get("Status", "")) == "completed"]
                 return True
-
+            
+            # 检测是否卡死（连续多轮文档数量和状态完全没变化）
+            current_total = len(statuses)
+            if current_total == last_doc_count and processing > 0:
+                unchanged_count += 1
+                if unchanged_count >= 6:  # 30 秒无任何变化（6轮 × 5秒）
+                    print(f"\n      [WARN] 检测到文档处理可能已停滞！")
+                    print(f"             {processing} 个文档连续 30+ 秒处于 'processing' 且无变化")
+                    print(f"             原因排查:")
+                    print(f"               1. Worker 进程可能崩溃或卡死 → 重启: go run ./cmd/worker")
+                    print(f"               2. Milvus 连接超时或不可达")
+                    print(f"               3. Embedding API 调用超时（网络问题）")
+                    print(f"               4. 查看 worker 终端的实时日志获取具体错误")
+                    
+                    if processing_docs:
+                        print(f"\n      卡住的文档:")
+                        for pd in processing_docs:
+                            print(pd)
+                    
+                    # 不再继续等待，直接返回 False
+                    return False
+            else:
+                unchanged_count = 0  # 有变化，重置计数器
+            
+            last_doc_count = current_total
             first_check = False
-            time.sleep(5)  # 每 5 秒轮询一次
+            time.sleep(5)
 
         # 超时但仍有 processing 的文档
         if processing > 0:
-            print(f"\n      [WARN] 等待 {timeout}s 超时，{processing} 个文档仍在处理中")
-            print("             请检查 worker 是否正常运行: go run ./cmd/worker")
-            print("             或检查 Redis / Milvus 连接是否正常")
+            elapsed = int(time.time() - start)
+            print(f"\n      [WARN] 等待 {elapsed}s 超时，{processing} 个文档仍在 'processing'")
+            print("             请检查 Worker 终端日志确认卡在哪个阶段:")
+            print("               - parseAndBuild (PDF 解析)")
+            print("               - IndexDocuments (向量写入 Milvus)")
+            print("               - Embedding (Embedding API 调用)")
         return False
+
+    def _cleanup_stuck_docs(self):
+        """清理之前测试留下的所有旧文档，确保干净环境"""
+        try:
+            docs = self.list_documents()
+            if not docs:
+                return
+            
+            print(f"\n      [CLEANUP] 发现 {len(docs)} 个旧文档需要清理:")
+            for d in docs:
+                try:
+                    did = d.get("ID") or d.get("id", "")
+                    fname = d.get("file_name") or d.get("FileName") or d.get("filename", "?")
+                    s = d.get("status") or d.get("Status", "")
+                    self._request("DELETE", f"/documents/{did}")
+                    print(f"                 删除: {fname} (原状态: {s})")
+                except Exception as e:
+                    print(f"                 删除失败 {fname}: {e}")
+            print()
+        except Exception as e:
+            pass  # 清理失败不影响主流程
 
     def create_session(self, notebook_id: str, title: str = "Eval Session") -> str:
         """创建聊天会话"""
@@ -390,7 +490,8 @@ class APIClient:
         self.session_id = sid
         return self.session_id
 
-    def chat_stream(self, notebook_id: str, session_id: str, question: str, timeout: int = 120) -> Dict:
+    def chat_stream(self, notebook_id: str, session_id: str, question: str,
+                     document_ids: list = None, timeout: int = 120, verbose: bool = False) -> Dict:
         """
         发起流式问答并收集完整响应
 
@@ -407,10 +508,11 @@ class APIClient:
 
         full_answer = ""
         sources = []
+        raw_lines = []  # for debugging
 
         try:
             conn.request("POST", url_path,
-                        body=json.dumps({"question": question}).encode(),
+                        body=json.dumps({"question": question, "document_ids": document_ids or []}).encode(),
                         headers=headers)
             resp = conn.getresponse()
 
@@ -419,31 +521,55 @@ class APIClient:
                 raise Exception(f"SSE 请求失败 HTTP {resp.status}: {body}")
 
             # 处理 SSE 流
-            for line in resp:
-                line = line.decode('utf-8').strip()
-                if not line.startswith('data: '):
+            line_count = 0
+            for raw_line in resp:
+                line_count += 1
+                decoded_line = raw_line.decode('utf-8').strip()
+                if verbose and line_count <= 5:
+                    print(f"          [SSE-{line_count}] {decoded_line[:120]}")
+                # 跳过空行、event: 行等
+                if not decoded_line.startswith('data: '):
                     continue
-                payload = line[6:]
+                payload = decoded_line[6:]
                 if payload.strip() == '[DONE]':
+                    if verbose:
+                        print(f"          [SSE] Received [DONE] after {len(raw_lines)} events")
                     break
                 try:
                     event_data = json.loads(payload)
-                    content = event_data.get('content', '')
+
+                    # 兼容多种字段名格式（Go json tag 可能是大写）
+                    content = (event_data.get('content', '')
+                               or event_data.get('Content', '')
+                               or '')
                     if content:
                         full_answer += content
-                    srcs = event_data.get('sources', [])
+
+                    srcs = (event_data.get('sources')
+                            or event_data.get('Sources')
+                            or [])
                     if srcs and not sources:
                         sources = [{
-                            'document_id': s.get('document_id', ''),
-                            'document_name': s.get('document_name', ''),
-                            'page_number': s.get('page_number', 0),
-                            'content': s.get('content', '')[:200],
-                            'score': s.get('score', 0),
+                            'document_id': s.get('document_id') or s.get('DocumentID') or s.get('id', ''),
+                            'document_name': s.get('document_name') or s.get('DocumentName') or s.get('filename', ''),
+                            'page_number': s.get('page_number') or s.get('PageNumber', 0),
+                            'content': (s.get('content') or s.get('Content', ''))[:200],
+                            'score': s.get('score') or s.get('Score', 0),
                         } for s in srcs]
-                except json.JSONDecodeError:
+
+                    if verbose and len(raw_lines) < 3:
+                        raw_lines.append(f"  event#{line_count}: keys={list(event_data.keys())}, "
+                                        f"content_len={len(content)}")
+                except json.JSONDecodeError as e:
+                    if verbose:
+                        print(f"          [SSE-JSON-ERR] {e} | payload={payload[:100]}")
                     pass
 
             latency_ms = int((time.time() - start_time) * 1000)
+
+            if verbose:
+                print(f"          [SSE-TOTAL] lines={line_count}, "
+                      f"answer_chars={len(full_answer)}, sources={len(sources)}")
 
             return {
                 'answer': full_answer.strip(),
@@ -724,6 +850,8 @@ def run_evaluation(args) -> EvalReport:
 
     # 上传测试文档（确保 RAG 有数据可检索）
     print("\n[2b/5] 准备测试文档...")
+    # 先清理旧的残留文档，避免与即将上传的文档混淆
+    client._cleanup_stuck_docs()
     # 优先查找项目根目录的 tests/pdf/ 或 tmp/uploads/ 中的 PDF
     pdf_dirs = [
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests", "pdf"),
@@ -775,36 +903,60 @@ def run_evaluation(args) -> EvalReport:
     results: List[EvalResult] = []
     latencies = []
 
+    # 初始化错误计数
+    total_errors = 0
+
     for i, item in enumerate(items):
         print(f"\n      [{i+1}/{len(items)}] {item.id} ({item.category})")
-        print(f"          Q: {item.question[:60]}...")
+
+        questions = conversation_questions(item)
+        effective_question = questions[-1] if questions else ""
+
+        print(f"          Q: {effective_question[:60]}...")
 
         result = EvalResult(
             item_id=item.id,
             category=item.category,
-            question=item.question,
+            question=effective_question,
             expected_answer=item.expected_answer,
         )
 
         try:
-            # 调用 API
-            start_time = time.time()
-            response = client.chat_stream(notebook_id, session_id, item.question, timeout=args.timeout)
+            # 调用 API（传入文档 ID 列表以启用 RAG 检索）
+            response = None
+            total_latency_ms = 0
+            for turn_index, question in enumerate(questions):
+                if len(questions) > 1:
+                    print(f"          Turn {turn_index + 1}/{len(questions)}: {question[:60]}...")
+                response = client.chat_stream(notebook_id, session_id, question,
+                                              document_ids=client.document_ids,
+                                              timeout=args.timeout,
+                                              verbose=getattr(args, 'verbose', False))
+                total_latency_ms += response['latency_ms']
+                if turn_index < len(questions) - 1:
+                    time.sleep(args.delay)
+
+            if response is None:
+                raise Exception("empty evaluation question")
+
             result.actual_answer = response['answer']
             result.sources = response['sources']
-            result.latency_ms = response['latency_ms']
+            result.latency_ms = total_latency_ms
             result.prompt_tokens = response['token_usage']['prompt_tokens']
             result.completion_tokens = response['token_usage']['completion_tokens']
             result.total_tokens = response['token_usage']['total_tokens']
 
             latencies.append(result.latency_ms)
 
-            print(f"          A: {result.actual_answer[:80]}...")
-            print(f"          Latency: {result.latency_ms}ms | Sources: {len(result.sources)}")
+            # 截断显示
+            _a = result.actual_answer[:80] + ('...' if len(result.actual_answer) > 80 else '')
+            print(f"          A: {_a}")
+            print(f"          Latency: {result.latency_ms}ms | Sources: {len(result.sources)} | "
+                  f"Chars: {len(result.actual_answer)}")
 
         except Exception as e:
             result.error = str(e)
-            results.error_count += 1
+            total_errors += 1
             print(f"          ERROR: {e}")
 
         # 计算检索召回率
@@ -828,12 +980,12 @@ def run_evaluation(args) -> EvalReport:
                 result.hallucination_details = judge_result.get('hallucination_details', '')
                 result.judge_reasoning = judge_result.get('reasoning', '')
 
-                # 计算综合分
+                # 计算综合分（先归一化到 0-1 再加权，满分 100）
                 result.overall_score = (
-                    result.groundedness_score * 30 +   # 30% 权重
-                    result.relevance_score * 25 +      # 25%
-                    result.completeness_score * 25 +    # 25%
-                    result.citation_precision * 20      # 20%
+                    (result.groundedness_score / 5) * 30 +   # 30% 权重
+                    (result.relevance_score / 5) * 25 +      # 25%
+                    (result.completeness_score / 5) * 25 +    # 25%
+                    result.citation_precision * 20             # 20%，已经是 0-1
                 )  # 满分 100
 
                 print(f"G={result.groundedness_score:.1f} R={result.relevance_score:.1f} "
@@ -1002,7 +1154,7 @@ def main():
         else 'https://api.openai.com/v1'
     )
     parser.add_argument('--judge-model',
-                       default=os.environ.get('EVAL_JUDGE_MODEL', 'gpt-4o-mini'),
+                       default=os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
                        help='Judge 模型名称 (默认 gpt-4o-mini)')
     parser.add_argument('--judge-api-key',
                        default=_default_judge_key,

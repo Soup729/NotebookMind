@@ -17,6 +17,8 @@ type ChatRepository interface {
 	SaveMessage(ctx context.Context, message *models.ChatMessage) error
 	ListSessionMessages(ctx context.Context, userID, sessionID string, limit int) ([]models.ChatMessage, error)
 	UpdateSessionActivity(ctx context.Context, userID, sessionID, title string, activityAt time.Time) error
+	UpdateSessionMemory(ctx context.Context, userID, sessionID, summary, memoryJSON string, messageCount int, updatedAt time.Time) error
+	ClearSessionMemory(ctx context.Context, userID, sessionID string) error
 	CountSessions(ctx context.Context, userID string) (int64, error)
 	CountMessages(ctx context.Context, userID string) (int64, error)
 	SumTokens(ctx context.Context, userID string) (int64, error)
@@ -66,11 +68,42 @@ func NewChatRepository(db *gorm.DB) (ChatRepository, error) {
 		return nil, fmt.Errorf("fix chat_message id type: %w", err)
 	}
 
-	if err := db.AutoMigrate(&models.ChatSession{}, &models.ChatMessage{}); err != nil {
+	if err := ensureChatSessionSchema(db); err != nil {
+		return nil, fmt.Errorf("ensure chat session schema: %w", err)
+	}
+
+	if err := db.AutoMigrate(&models.ChatMessage{}); err != nil {
 		return nil, fmt.Errorf("auto migrate chat tables: %w", err)
 	}
 
 	return &chatRepository{db: db}, nil
+}
+
+func ensureChatSessionSchema(db *gorm.DB) error {
+	if !db.Migrator().HasTable(&models.ChatSession{}) {
+		return db.AutoMigrate(&models.ChatSession{})
+	}
+
+	statements := []string{
+		`ALTER TABLE "chat_sessions" ADD COLUMN IF NOT EXISTS "notebook_id" varchar(36)`,
+		`UPDATE "chat_sessions" SET "notebook_id" = '' WHERE "notebook_id" IS NULL`,
+		`ALTER TABLE "chat_sessions" ALTER COLUMN "notebook_id" SET NOT NULL`,
+		`ALTER TABLE "chat_sessions" ADD COLUMN IF NOT EXISTS "memory_summary" text`,
+		`ALTER TABLE "chat_sessions" ADD COLUMN IF NOT EXISTS "memory_json" text`,
+		`ALTER TABLE "chat_sessions" ADD COLUMN IF NOT EXISTS "memory_message_count" bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE "chat_sessions" ADD COLUMN IF NOT EXISTS "memory_updated_at" timestamptz`,
+		`CREATE INDEX IF NOT EXISTS "idx_chat_sessions_user_id" ON "chat_sessions" ("user_id")`,
+		`CREATE INDEX IF NOT EXISTS "idx_chat_sessions_notebook_id" ON "chat_sessions" ("notebook_id")`,
+		`CREATE INDEX IF NOT EXISTS "idx_chat_sessions_last_message_at" ON "chat_sessions" ("last_message_at")`,
+		`CREATE INDEX IF NOT EXISTS "idx_chat_sessions_created_at" ON "chat_sessions" ("created_at")`,
+		`CREATE INDEX IF NOT EXISTS "idx_chat_sessions_memory_updated_at" ON "chat_sessions" ("memory_updated_at")`,
+	}
+	for _, stmt := range statements {
+		if err := db.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // fixChatMessageSessionIDType 将 chat_messages.session_id 从 bigint 改为 varchar(36)
@@ -193,13 +226,19 @@ func (r *chatRepository) SaveMessage(ctx context.Context, message *models.ChatMe
 func (r *chatRepository) ListSessionMessages(ctx context.Context, userID, sessionID string, limit int) ([]models.ChatMessage, error) {
 	var messages []models.ChatMessage
 	query := r.db.WithContext(ctx).
-		Where("user_id = ? AND session_id = ?", userID, sessionID).
-		Order("created_at asc")
+		Where("user_id = ? AND session_id = ?", userID, sessionID)
 	if limit > 0 {
-		query = query.Limit(limit)
+		query = query.Order("created_at desc").Limit(limit)
+	} else {
+		query = query.Order("created_at asc")
 	}
 	if err := query.Find(&messages).Error; err != nil {
 		return nil, fmt.Errorf("list session messages: %w", err)
+	}
+	if limit > 0 {
+		for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+			messages[i], messages[j] = messages[j], messages[i]
+		}
 	}
 	return messages, nil
 }
@@ -217,6 +256,39 @@ func (r *chatRepository) UpdateSessionActivity(ctx context.Context, userID, sess
 		Where("user_id = ? AND id = ?", userID, sessionID).
 		Updates(updates).Error; err != nil {
 		return fmt.Errorf("update session activity: %w", err)
+	}
+	return nil
+}
+
+func (r *chatRepository) UpdateSessionMemory(ctx context.Context, userID, sessionID, summary, memoryJSON string, messageCount int, updatedAt time.Time) error {
+	updates := map[string]any{
+		"memory_summary":       summary,
+		"memory_json":          memoryJSON,
+		"memory_message_count": messageCount,
+		"memory_updated_at":    updatedAt,
+		"updated_at":           updatedAt,
+	}
+	if err := r.db.WithContext(ctx).
+		Model(&models.ChatSession{}).
+		Where("user_id = ? AND id = ?", userID, sessionID).
+		Updates(updates).Error; err != nil {
+		return fmt.Errorf("update session memory: %w", err)
+	}
+	return nil
+}
+
+func (r *chatRepository) ClearSessionMemory(ctx context.Context, userID, sessionID string) error {
+	if err := r.db.WithContext(ctx).
+		Model(&models.ChatSession{}).
+		Where("user_id = ? AND id = ?", userID, sessionID).
+		Updates(map[string]any{
+			"memory_summary":       "",
+			"memory_json":          "",
+			"memory_message_count": 0,
+			"memory_updated_at":    nil,
+			"updated_at":           time.Now(),
+		}).Error; err != nil {
+		return fmt.Errorf("clear session memory: %w", err)
 	}
 	return nil
 }

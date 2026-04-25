@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -26,6 +27,13 @@ type NotebookRepository interface {
 	// DocumentGuide operations
 	UpsertGuide(ctx context.Context, guide *models.DocumentGuide) error
 	GetGuide(ctx context.Context, documentID string) (*models.DocumentGuide, error)
+
+	// Notebook artifact operations
+	UpsertArtifact(ctx context.Context, artifact *models.NotebookArtifact) error
+	GetArtifact(ctx context.Context, userID, notebookID, artifactID string) (*models.NotebookArtifact, error)
+	GetArtifactByID(ctx context.Context, artifactID string) (*models.NotebookArtifact, error)
+	ListArtifacts(ctx context.Context, userID, notebookID string) ([]models.NotebookArtifact, error)
+	DeleteArtifact(ctx context.Context, userID, notebookID, artifactID string) error
 }
 
 // notebookRepository implements NotebookRepository
@@ -35,7 +43,7 @@ type notebookRepository struct {
 
 // NewNotebookRepository creates a new NotebookRepository instance
 func NewNotebookRepository(db *gorm.DB) (NotebookRepository, error) {
-	if err := db.AutoMigrate(&models.Notebook{}, &models.NotebookDocument{}, &models.DocumentGuide{}); err != nil {
+	if err := db.AutoMigrate(&models.Notebook{}, &models.NotebookDocument{}, &models.DocumentGuide{}, &models.NotebookArtifact{}); err != nil {
 		return nil, fmt.Errorf("auto migrate notebooks: %w", err)
 	}
 	return &notebookRepository{db: db}, nil
@@ -273,6 +281,75 @@ func (r *notebookRepository) GetGuide(ctx context.Context, documentID string) (*
 		return nil, fmt.Errorf("get document guide: %w", err)
 	}
 	return &guide, nil
+}
+
+func (r *notebookRepository) UpsertArtifact(ctx context.Context, artifact *models.NotebookArtifact) error {
+	now := time.Now()
+	if artifact.ID == "" {
+		artifact.ID = generateUUID()
+	}
+	if artifact.GeneratedAt == nil && artifact.Status == models.ArtifactStatusCompleted {
+		artifact.GeneratedAt = &now
+	}
+	if artifact.CreatedAt.IsZero() {
+		artifact.CreatedAt = now
+	}
+	artifact.UpdatedAt = now
+
+	if err := r.db.WithContext(ctx).Save(artifact).Error; err != nil {
+		return fmt.Errorf("upsert notebook artifact: %w", err)
+	}
+	return nil
+}
+
+func (r *notebookRepository) GetArtifact(ctx context.Context, userID, notebookID, artifactID string) (*models.NotebookArtifact, error) {
+	var artifact models.NotebookArtifact
+	if err := r.db.WithContext(ctx).
+		Where("id = ? AND user_id = ? AND notebook_id = ?", artifactID, userID, notebookID).
+		First(&artifact).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get notebook artifact: %w", err)
+	}
+	return &artifact, nil
+}
+
+func (r *notebookRepository) GetArtifactByID(ctx context.Context, artifactID string) (*models.NotebookArtifact, error) {
+	var artifact models.NotebookArtifact
+	if err := r.db.WithContext(ctx).
+		Where("id = ?", artifactID).
+		First(&artifact).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get notebook artifact by id: %w", err)
+	}
+	return &artifact, nil
+}
+
+func (r *notebookRepository) ListArtifacts(ctx context.Context, userID, notebookID string) ([]models.NotebookArtifact, error) {
+	var artifacts []models.NotebookArtifact
+	if err := r.db.WithContext(ctx).
+		Where("user_id = ? AND notebook_id = ?", userID, notebookID).
+		Order("updated_at desc").
+		Find(&artifacts).Error; err != nil {
+		return nil, fmt.Errorf("list notebook artifacts: %w", err)
+	}
+	return artifacts, nil
+}
+
+func (r *notebookRepository) DeleteArtifact(ctx context.Context, userID, notebookID, artifactID string) error {
+	result := r.db.WithContext(ctx).
+		Where("id = ? AND user_id = ? AND notebook_id = ?", artifactID, userID, notebookID).
+		Delete(&models.NotebookArtifact{})
+	if result.Error != nil {
+		return fmt.Errorf("delete notebook artifact: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func generateUUID() string {

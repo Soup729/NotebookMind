@@ -8,7 +8,7 @@ import (
 type ParserService interface {
 	// ParseDocument 解析 PDF 文档，返回结构化块列表
 	ParseDocument(ctx context.Context, filePath string, userID, documentID string) (*ParseResult, error)
-	
+
 	// BuildChunks 从结构化块构建父子 chunk（用于向量入库）
 	BuildChunks(result *ParseResult, userID, documentID string) ([]*Chunk, []*Chunk)
 }
@@ -32,26 +32,29 @@ type VLMProvider interface {
 // ParserConfig 解析器配置
 type ParserConfig struct {
 	// 分块配置
-	ChunkSize     int `json:"chunk_size"`      // 父块最大字符数，默认 1000
-	ChunkOverlap  int `json:"chunk_overlap"`    // 父块重叠字符数，默认 200
+	ChunkSize      int `json:"chunk_size"`       // 父块最大字符数，默认 1000
+	ChunkOverlap   int `json:"chunk_overlap"`    // 父块重叠字符数，默认 200
 	ChildChunkSize int `json:"child_chunk_size"` // 子块（用于召回）最大字符数，默认 300
-	
+
 	// 表格配置
-	ExtractTables   bool `json:"extract_tables"`    // 是否提取表格，默认 true
-	TableMaxRows    int  `json:"table_max_rows"`     // 单表最大行数，默认 100
-	TableMaxCols    int  `json:"table_max_cols"`     // 单表最大列数，默认 20
-	
+	ExtractTables bool `json:"extract_tables"` // 是否提取表格，默认 true
+	TableMaxRows  int  `json:"table_max_rows"` // 单表最大行数，默认 100
+	TableMaxCols  int  `json:"table_max_cols"` // 单表最大列数，默认 20
+
 	// 图片配置
-	ExtractImages   bool  `json:"extract_images"`      // 是否提取图片，默认 true
-	ImageMinSize    int   `json:"image_min_size"`       // 最小图片尺寸（像素），默认 50
-	VLMEnabled      bool  `json:"vlm_enabled"`          // 是否启用 VLM 描述生成，默认 false（需配置）
-	VLMBatchSize    int   `json:"vlm_batch_size"`        // VLM 批量处理大小，默认 5
-	
+	ExtractImages          bool   `json:"extract_images"`           // 是否提取图片，默认 true
+	ImageMinSize           int    `json:"image_min_size"`           // 最小图片尺寸（像素），默认 50
+	VLMEnabled             bool   `json:"vlm_enabled"`              // 是否启用 VLM 描述生成，默认 false（需配置）
+	VLMBatchSize           int    `json:"vlm_batch_size"`           // VLM 批量处理大小，默认 5
+	SaveVisualRegions      bool   `json:"save_visual_regions"`      // 是否保存图片/图表区域文件
+	VisualStorageRoot      string `json:"visual_storage_root"`      // 图片区域保存根目录
+	ChartExtractionEnabled bool   `json:"chart_extraction_enabled"` // 是否要求 VLM 输出图表结构化信息
+
 	// OCR 配置
-	OCRThreshold    float32 `json:"ocr_threshold"`       // 文本密度阈值，低于此值触发 OCR，默认 0.1
-	OCREnabled      bool    `json:"ocr_enabled"`         // 是否启用 OCR 能力，默认 true
-	
+	OCRThreshold float32 `json:"ocr_threshold"` // 文本密度阈值，低于此值触发 OCR，默认 0.1
+	OCREnabled   bool    `json:"ocr_enabled"`   // 是否启用 OCR 能力，默认 true
+
 	// 标题检测配置
-	DetectHeadings  bool `json:"detect_headings"`        // 是否检测标题层级，默认 true
+	DetectHeadings     bool    `json:"detect_headings"`       // 是否检测标题层级，默认 true
 	MinHeadingFontSize float32 `json:"min_heading_font_size"` // 最小标题字号比例，默认 1.2
 }

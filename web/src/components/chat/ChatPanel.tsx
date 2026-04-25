@@ -21,8 +21,10 @@ import { ChatMessage } from './ChatMessage';
 import { useChat, useSourceCitation } from '@/hooks/useChat';
 import { useCreateNote } from '@/hooks/useNotes';
 import { useAvailableModels } from '@/hooks/useNotebook';
+import { detectExportIntent } from '@/lib/exportIntent';
 import { useNotebookStore } from '@/store/useNotebookStore';
 import type { ChatMessage as ChatMessageType, ChatSource, Session } from '@/types/api';
+import type { ExportIntent } from '@/lib/exportIntent';
 
 // ============================================================
 // 类型定义
@@ -31,10 +33,11 @@ import type { ChatMessage as ChatMessageType, ChatSource, Session } from '@/type
 interface ChatPanelProps {
   notebookId: string;
   sessionId: string | null;
-  onSessionCreate?: (session: Session) => void;
+  onSessionCreate?: () => void | Promise<void>;
   className?: string;
   /** 从文档指南点击的建议问题（填入输入框） */
   pendingQuery?: string | null;
+  onExportIntent?: (intent: ExportIntent) => void;
 }
 
 // ============================================================
@@ -73,6 +76,7 @@ export function ChatPanel({
   onSessionCreate,
   className,
   pendingQuery,
+  onExportIntent,
 }: ChatPanelProps) {
   // State
   const [inputValue, setInputValue] = useState('');
@@ -136,6 +140,13 @@ export function ChatPanel({
     const trimmedValue = inputValue.trim();
     if (!trimmedValue || isStreaming) return;
 
+    const exportIntent = detectExportIntent(trimmedValue);
+    if (exportIntent && onExportIntent) {
+      onExportIntent(exportIntent);
+      setInputValue('');
+      return;
+    }
+
     // 如果没有会话，先创建新会话，再自动发送消息
     if (!sessionId && onSessionCreate) {
       setInputValue('');
@@ -147,7 +158,7 @@ export function ChatPanel({
 
     setInputValue('');
     await sendMessage(trimmedValue, selectedDocumentIds);
-  }, [inputValue, isStreaming, sessionId, onSessionCreate, sendMessage, selectedDocumentIds]);
+  }, [inputValue, isStreaming, sessionId, onSessionCreate, sendMessage, selectedDocumentIds, onExportIntent]);
 
   // ============================================================
   // 当 sessionId 从 null 变为有值时，如果有待发送消息则自动发送
@@ -193,10 +204,13 @@ export function ChatPanel({
 
   const onSourceClick = useCallback(
     (source: ChatSource) => {
+      const boundingBox = source.bounding_box && source.bounding_box.length === 4
+        ? source.bounding_box
+        : [0, 0, 0, 0] as [number, number, number, number];
       // 使用 store 的方法切换到 PDF 视图
       setMainViewToPdf(source.document_id, {
         pageNumber: source.page_number,
-        boundingBox: [0, 0, 0, 0],
+        boundingBox,
         sourceId: source.document_id,
         documentId: source.document_id,
         documentName: source.document_name,
@@ -220,6 +234,9 @@ export function ChatPanel({
         chunk_index: Number(source.chunk_index),
         content: String(source.content),
         score: Number(source.score),
+        chunk_type: source.chunk_type,
+        section_path: source.section_path,
+        bounding_box: source.bounding_box,
       }));
 
       const note = await createNote({

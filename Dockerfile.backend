@@ -1,0 +1,31 @@
+FROM golang:1.25-bookworm AS builder
+
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends g++ ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 go build -o /out/api ./cmd/api && \
+    CGO_ENABLED=1 go build -o /out/worker ./cmd/worker
+
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 python3-pip && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/api /app/api
+COPY --from=builder /out/worker /app/worker
+COPY configs /app/configs
+COPY scripts/render_export.py /app/scripts/render_export.py
+COPY scripts/requirements-export.txt /app/scripts/requirements-export.txt
+RUN python3 -m pip install --break-system-packages -r /app/scripts/requirements-export.txt
+
+RUN mkdir -p /app/logs /app/tmp/uploads /app/storage/exports
+
+EXPOSE 8081
+
+CMD ["/app/api"]

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -27,14 +28,21 @@ type milvusRepo struct {
 	dimension int
 }
 
+// milvusRequiredFields 定义 v2 schema 必需的字段（含 Phase 1 扩展字段）
 var milvusRequiredFields = map[string]entity.FieldType{
-	"id":          entity.FieldTypeInt64,
-	"user_id":     entity.FieldTypeVarChar,
-	"document_id": entity.FieldTypeVarChar,
-	"file_name":   entity.FieldTypeVarChar,
-	"chunk_index": entity.FieldTypeInt64,
-	"text":        entity.FieldTypeVarChar,
-	"vector":      entity.FieldTypeFloatVector,
+	"id":           entity.FieldTypeInt64,
+	"user_id":      entity.FieldTypeVarChar,
+	"document_id":  entity.FieldTypeVarChar,
+	"file_name":    entity.FieldTypeVarChar,
+	"chunk_index":  entity.FieldTypeInt64,
+	"page_num":     entity.FieldTypeInt64,
+	"chunk_type":   entity.FieldTypeVarChar,
+	"chunk_role":   entity.FieldTypeVarChar,
+	"parent_id":    entity.FieldTypeVarChar,
+	"section_path": entity.FieldTypeVarChar,
+	"bbox":         entity.FieldTypeVarChar,
+	"text":         entity.FieldTypeVarChar,
+	"vector":       entity.FieldTypeFloatVector,
 }
 
 func NewMilvusStore(ctx context.Context, cfg *configs.MilvusConfig, embedder embeddings.Embedder) (VectorStore, error) {
@@ -88,6 +96,12 @@ func (m *milvusRepo) AddDocuments(ctx context.Context, docs []schema.Document) e
 	documentIDs := make([]string, 0, len(docs))
 	fileNames := make([]string, 0, len(docs))
 	chunkIndexes := make([]int64, 0, len(docs))
+	pageNums := make([]int64, 0, len(docs))
+	chunkTypes := make([]string, 0, len(docs))
+	chunkRoles := make([]string, 0, len(docs))
+	parentIDs := make([]string, 0, len(docs))
+	sectionPaths := make([]string, 0, len(docs))
+	bboxes := make([]string, 0, len(docs))
 
 	for _, doc := range docs {
 		text := strings.TrimSpace(doc.PageContent)
@@ -105,6 +119,18 @@ func (m *milvusRepo) AddDocuments(ctx context.Context, docs []schema.Document) e
 		documentIDs = append(documentIDs, documentID)
 		fileNames = append(fileNames, metadataString(doc.Metadata, "file_name"))
 		chunkIndexes = append(chunkIndexes, int64(metadataInt(doc.Metadata, "chunk_index")))
+		pageNums = append(pageNums, int64(metadataInt(doc.Metadata, "page_num")))
+		chunkTypes = append(chunkTypes, metadataString(doc.Metadata, "chunk_type"))
+		chunkRoles = append(chunkRoles, metadataString(doc.Metadata, "chunk_role"))
+		parentIDs = append(parentIDs, metadataString(doc.Metadata, "parent_id"))
+
+		// section_path: 序列化为 JSON 字符串
+		sectionPathJSON := metadataSliceJSON(doc.Metadata, "section_path")
+		sectionPaths = append(sectionPaths, sectionPathJSON)
+
+		// bbox: 序列化为 JSON 字符串
+		bboxJSON := metadataAnyJSON(doc.Metadata, "bbox")
+		bboxes = append(bboxes, bboxJSON)
 	}
 	if len(texts) == 0 {
 		return nil
@@ -123,6 +149,12 @@ func (m *milvusRepo) AddDocuments(ctx context.Context, docs []schema.Document) e
 		entity.NewColumnVarChar("document_id", documentIDs),
 		entity.NewColumnVarChar("file_name", fileNames),
 		entity.NewColumnInt64("chunk_index", chunkIndexes),
+		entity.NewColumnInt64("page_num", pageNums),
+		entity.NewColumnVarChar("chunk_type", chunkTypes),
+		entity.NewColumnVarChar("chunk_role", chunkRoles),
+		entity.NewColumnVarChar("parent_id", parentIDs),
+		entity.NewColumnVarChar("section_path", sectionPaths),
+		entity.NewColumnVarChar("bbox", bboxes),
 		entity.NewColumnVarChar("text", texts),
 		entity.NewColumnFloatVector("vector", m.dimension, vectors),
 	)
@@ -146,12 +178,19 @@ func (m *milvusRepo) SimilaritySearch(ctx context.Context, query string, k int, 
 	if err != nil {
 		return nil, fmt.Errorf("build Milvus search params: %w", err)
 	}
+
+	// 输出字段包含扩展字段
+	outputFields := []string{
+		"text", "user_id", "document_id", "file_name", "chunk_index",
+		"page_num", "chunk_type", "chunk_role", "parent_id", "section_path", "bbox",
+	}
+
 	results, err := m.cli.Search(
 		ctx,
 		m.colName,
 		nil,
 		buildMilvusExpr(opts),
-		[]string{"text", "user_id", "document_id", "file_name", "chunk_index"},
+		outputFields,
 		[]entity.Vector{entity.FloatVector(vector)},
 		"vector",
 		entity.L2,
@@ -172,6 +211,12 @@ func (m *milvusRepo) SimilaritySearch(ctx context.Context, query string, k int, 
 		documentColumn, _ := result.Fields.GetColumn("document_id").(*entity.ColumnVarChar)
 		fileColumn, _ := result.Fields.GetColumn("file_name").(*entity.ColumnVarChar)
 		chunkColumn, _ := result.Fields.GetColumn("chunk_index").(*entity.ColumnInt64)
+		pageNumColumn, _ := result.Fields.GetColumn("page_num").(*entity.ColumnInt64)
+		chunkTypeColumn, _ := result.Fields.GetColumn("chunk_type").(*entity.ColumnVarChar)
+		chunkRoleColumn, _ := result.Fields.GetColumn("chunk_role").(*entity.ColumnVarChar)
+		parentIDColumn, _ := result.Fields.GetColumn("parent_id").(*entity.ColumnVarChar)
+		sectionPathColumn, _ := result.Fields.GetColumn("section_path").(*entity.ColumnVarChar)
+		bboxColumn, _ := result.Fields.GetColumn("bbox").(*entity.ColumnVarChar)
 
 		for i := 0; i < result.ResultCount; i++ {
 			text, _ := textColumn.ValueByIdx(i)
@@ -179,16 +224,48 @@ func (m *milvusRepo) SimilaritySearch(ctx context.Context, query string, k int, 
 			documentID, _ := documentColumn.ValueByIdx(i)
 			fileName, _ := fileColumn.ValueByIdx(i)
 			chunkIndex, _ := chunkColumn.ValueByIdx(i)
+			pageNum, _ := pageNumColumn.ValueByIdx(i)
+			chunkType, _ := chunkTypeColumn.ValueByIdx(i)
+			chunkRole, _ := chunkRoleColumn.ValueByIdx(i)
+			parentID, _ := parentIDColumn.ValueByIdx(i)
+			sectionPathStr, _ := sectionPathColumn.ValueByIdx(i)
+			bboxStr, _ := bboxColumn.ValueByIdx(i)
+
+			metadata := map[string]any{
+				"user_id":     userID,
+				"document_id": documentID,
+				"file_name":   fileName,
+				"chunk_index": chunkIndex,
+				"page_num":    pageNum,
+				"chunk_type":  chunkType,
+				"chunk_role":  chunkRole,
+				"parent_id":   parentID,
+			}
+
+			// 反序列化 section_path
+			if sectionPathStr != "" {
+				var sp []string
+				if err := json.Unmarshal([]byte(sectionPathStr), &sp); err == nil {
+					metadata["section_path"] = sp
+				} else {
+					metadata["section_path"] = sectionPathStr
+				}
+			}
+
+			// 反序列化 bbox
+			if bboxStr != "" {
+				var bbox []float32
+				if err := json.Unmarshal([]byte(bboxStr), &bbox); err == nil {
+					metadata["bbox"] = bbox
+				} else {
+					metadata["bbox"] = bboxStr
+				}
+			}
 
 			docs = append(docs, schema.Document{
 				PageContent: text,
 				Score:       result.Scores[i],
-				Metadata: map[string]any{
-					"user_id":     userID,
-					"document_id": documentID,
-					"file_name":   fileName,
-					"chunk_index": chunkIndex,
-				},
+				Metadata:    metadata,
 			})
 		}
 	}
@@ -233,6 +310,7 @@ func ensureCompatibleMilvusCollection(ctx context.Context, cli client.Client, cf
 		return "", fmt.Errorf("Milvus collection name is required")
 	}
 
+	// Phase 1: 查找已有兼容的 collection
 	for version := 0; version < 10; version++ {
 		candidate := baseName
 		if version > 0 {
@@ -244,16 +322,7 @@ func ensureCompatibleMilvusCollection(ctx context.Context, cli client.Client, cf
 			return "", fmt.Errorf("check collection %s: %w", candidate, err)
 		}
 		if !has {
-			if err := createMilvusCollection(ctx, cli, candidate, cfg.Dimension); err != nil {
-				return "", err
-			}
-			if version > 0 {
-				zap.L().Warn("existing Milvus collection schema is incompatible; using a new compatible collection instead",
-					zap.String("requested_collection", baseName),
-					zap.String("effective_collection", candidate),
-				)
-			}
-			return candidate, nil
+			break // 不存在，后续处理
 		}
 
 		description, err := cli.DescribeCollection(ctx, candidate)
@@ -276,19 +345,70 @@ func ensureCompatibleMilvusCollection(ctx context.Context, cli client.Client, cf
 		}
 	}
 
-	return "", fmt.Errorf("unable to find or create a compatible Milvus collection for %s", baseName)
+	// Phase 2: 没有兼容的 collection，需要创建。先尝试在 baseName 上创建。
+	// 如果 baseName 已存在但不兼容，先删除旧 collection 释放空间。
+	has, err := cli.HasCollection(ctx, baseName)
+	if err != nil {
+		return "", fmt.Errorf("check collection %s: %w", baseName, err)
+	}
+	if has {
+		zap.L().Warn("dropping incompatible Milvus collection to reclaim slot",
+			zap.String("collection", baseName),
+		)
+		if err := cli.DropCollection(ctx, baseName); err != nil {
+			return "", fmt.Errorf("drop incompatible collection %s: %w", baseName, err)
+		}
+	}
+
+	// 尝试创建新 collection
+	if err := createMilvusCollection(ctx, cli, baseName, cfg.Dimension); err != nil {
+		// 如果创建失败（可能是 collection 数量上限），尝试清理更多旧版本
+		zap.L().Warn("failed to create collection, attempting to clean up old versions",
+			zap.String("collection", baseName),
+			zap.Error(err),
+		)
+		for version := 2; version <= 10; version++ {
+			candidate := fmt.Sprintf("%s_v%d", baseName, version)
+			exists, checkErr := cli.HasCollection(ctx, candidate)
+			if checkErr != nil {
+				continue
+			}
+			if exists {
+				zap.L().Warn("dropping old versioned Milvus collection to reclaim slot",
+					zap.String("collection", candidate),
+				)
+				if dropErr := cli.DropCollection(ctx, candidate); dropErr != nil {
+					zap.L().Warn("failed to drop collection", zap.String("collection", candidate), zap.Error(dropErr))
+					continue
+				}
+				// 清理一个后重试创建
+				if createErr := createMilvusCollection(ctx, cli, baseName, cfg.Dimension); createErr == nil {
+					return baseName, nil
+				}
+			}
+		}
+		return "", fmt.Errorf("unable to create compatible Milvus collection %s after cleanup: %w", baseName, err)
+	}
+
+	return baseName, nil
 }
 
 func createMilvusCollection(ctx context.Context, cli client.Client, collectionName string, dimension int) error {
 	schemaDef := entity.NewSchema().
 		WithName(collectionName).
-		WithDescription("enterprise pdf chunks").
+		WithDescription("enterprise pdf chunks with structured metadata").
 		WithAutoID(true).
 		WithField(entity.NewField().WithName("id").WithDataType(entity.FieldTypeInt64).WithIsPrimaryKey(true).WithIsAutoID(true)).
 		WithField(entity.NewField().WithName("user_id").WithDataType(entity.FieldTypeVarChar).WithMaxLength(128)).
 		WithField(entity.NewField().WithName("document_id").WithDataType(entity.FieldTypeVarChar).WithMaxLength(128)).
 		WithField(entity.NewField().WithName("file_name").WithDataType(entity.FieldTypeVarChar).WithMaxLength(512)).
 		WithField(entity.NewField().WithName("chunk_index").WithDataType(entity.FieldTypeInt64)).
+		WithField(entity.NewField().WithName("page_num").WithDataType(entity.FieldTypeInt64)).
+		WithField(entity.NewField().WithName("chunk_type").WithDataType(entity.FieldTypeVarChar).WithMaxLength(32)).
+		WithField(entity.NewField().WithName("chunk_role").WithDataType(entity.FieldTypeVarChar).WithMaxLength(16)).
+		WithField(entity.NewField().WithName("parent_id").WithDataType(entity.FieldTypeVarChar).WithMaxLength(128)).
+		WithField(entity.NewField().WithName("section_path").WithDataType(entity.FieldTypeVarChar).WithMaxLength(1024)).
+		WithField(entity.NewField().WithName("bbox").WithDataType(entity.FieldTypeVarChar).WithMaxLength(256)).
 		WithField(entity.NewField().WithName("text").WithDataType(entity.FieldTypeVarChar).WithMaxLength(65535)).
 		WithField(entity.NewField().WithName("vector").WithDataType(entity.FieldTypeFloatVector).WithDim(int64(dimension)))
 
@@ -339,4 +459,50 @@ func validateMilvusCollectionSchema(collection *entity.Collection, expectedDimen
 		return fmt.Errorf("vector dimension mismatch: got %d want %d", parsedDim, expectedDimension)
 	}
 	return nil
+}
+
+// ========== metadata 辅助函数（扩展） ==========
+
+// metadataSliceJSON 将 metadata 中的字符串切片序列化为 JSON
+func metadataSliceJSON(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	switch val := v.(type) {
+	case []string:
+		if len(val) == 0 {
+			return ""
+		}
+		b, _ := json.Marshal(val)
+		return string(b)
+	case string:
+		return val
+	default:
+		b, _ := json.Marshal(val)
+		return string(b)
+	}
+}
+
+// metadataAnyJSON 将 metadata 中的任意值序列化为 JSON
+func metadataAnyJSON(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case nil:
+		return ""
+	default:
+		b, _ := json.Marshal(val)
+		return string(b)
+	}
 }

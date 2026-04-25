@@ -9,6 +9,7 @@ import (
 
 	"NotebookAI/internal/configs"
 	"NotebookAI/internal/models"
+	"NotebookAI/internal/parser"
 	"NotebookAI/internal/repository"
 )
 
@@ -114,6 +115,26 @@ func (r *MockNotebookRepository) GetGuide(ctx context.Context, documentID string
 	return nil, ErrNotFound
 }
 
+func (r *MockNotebookRepository) UpsertArtifact(context.Context, *models.NotebookArtifact) error {
+	return nil
+}
+
+func (r *MockNotebookRepository) GetArtifact(context.Context, string, string, string) (*models.NotebookArtifact, error) {
+	return nil, ErrNotFound
+}
+
+func (r *MockNotebookRepository) GetArtifactByID(context.Context, string) (*models.NotebookArtifact, error) {
+	return nil, ErrNotFound
+}
+
+func (r *MockNotebookRepository) ListArtifacts(context.Context, string, string) ([]models.NotebookArtifact, error) {
+	return nil, nil
+}
+
+func (r *MockNotebookRepository) DeleteArtifact(context.Context, string, string, string) error {
+	return nil
+}
+
 // MockNotebookVectorStore implements NotebookVectorStore for testing
 type MockNotebookVectorStore struct {
 	chunks []struct {
@@ -159,6 +180,14 @@ func (m *MockNotebookVectorStore) DeleteByNotebook(ctx context.Context, notebook
 	return nil
 }
 
+func (m *MockNotebookVectorStore) GetAllChunks(ctx context.Context) ([]repository.NotebookChunk, error) {
+	chunks := make([]repository.NotebookChunk, 0, len(m.chunks))
+	for _, c := range m.chunks {
+		chunks = append(chunks, c.chunk)
+	}
+	return chunks, nil
+}
+
 // MockEmbedder implements embeddings.Embedder for testing
 type MockEmbedder struct{}
 
@@ -189,7 +218,7 @@ func TestNotebookService_CreateNotebook(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 	userID := "test-user-1"
@@ -218,7 +247,7 @@ func TestNotebookService_GetNotebook(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 	userID := "test-user-1"
@@ -244,7 +273,7 @@ func TestNotebookService_GetNotebook_NotFound(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 
@@ -260,7 +289,7 @@ func TestNotebookService_ListNotebooks(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 	userID := "test-user-1"
@@ -288,7 +317,7 @@ func TestNotebookService_UpdateNotebook(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 	userID := "test-user-1"
@@ -314,7 +343,7 @@ func TestNotebookService_DeleteNotebook(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 	userID := "test-user-1"
@@ -338,7 +367,7 @@ func TestNotebookService_AddDocumentToNotebook(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 	userID := "test-user-1"
@@ -357,7 +386,7 @@ func TestNotebookService_GetDocumentGuide_NotFound(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 
@@ -375,18 +404,18 @@ func TestMockNotebookVectorStore_InsertAndSearch(t *testing.T) {
 
 	chunks := []repository.NotebookChunk{
 		{
-			NotebookID:  "nb-1",
-			DocumentID:  "doc-1",
-			PageNumber:  1,
-			ChunkIndex:  0,
-			Content:     "这是第一段内容",
+			NotebookID: "nb-1",
+			DocumentID: "doc-1",
+			PageNumber: 1,
+			ChunkIndex: 0,
+			Content:    "这是第一段内容",
 		},
 		{
-			NotebookID:  "nb-1",
-			DocumentID:  "doc-1",
-			PageNumber:  1,
-			ChunkIndex:  1,
-			Content:     "这是第二段内容",
+			NotebookID: "nb-1",
+			DocumentID: "doc-1",
+			PageNumber: 1,
+			ChunkIndex: 1,
+			Content:    "这是第二段内容",
 		},
 	}
 
@@ -415,6 +444,41 @@ func TestMockNotebookVectorStore_InsertAndSearch(t *testing.T) {
 	}
 }
 
+func TestNotebookServiceIndexesParsedChunksWithStructuredVisualMetadata(t *testing.T) {
+	repo := NewMockNotebookRepository()
+	store := NewMockNotebookVectorStore()
+	embedder := &MockEmbedder{}
+	svc := NewNotebookService(repo, store, embedder, nil, &configs.LLMConfig{}, nil)
+
+	err := svc.IndexParsedChunks(context.Background(), "user-1", "notebook-1", "doc-1", []*parser.Chunk{
+		{
+			ID:         "chunk-1",
+			Content:    "[Visual: chart]\nSummary: Revenue grew.\nVisualPath: storage/visual/doc-1/page-1/block-1.png",
+			PageNum:    1,
+			ChunkIndex: 3,
+			ChunkType:  parser.BlockTypeImage,
+			BBox:       parser.BoundingBox{X0: 1, Y0: 2, X1: 3, Y1: 4},
+			Metadata: map[string]any{
+				"chunk_role":  "parent",
+				"visual_type": "chart",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("IndexParsedChunks returned error: %v", err)
+	}
+	if len(store.chunks) != 1 {
+		t.Fatalf("expected one indexed chunk, got %d", len(store.chunks))
+	}
+	chunk := store.chunks[0].chunk
+	if chunk.ChunkType != "image" || chunk.ChunkRole != "parent" {
+		t.Fatalf("expected structured chunk metadata, got %#v", chunk)
+	}
+	if chunk.PageNumber != 0 || chunk.BBox != `[1,2,3,4]` {
+		t.Fatalf("expected normalized page/bbox metadata, got page=%d bbox=%q", chunk.PageNumber, chunk.BBox)
+	}
+}
+
 // ============ 并发测试 ============
 
 func TestNotebookService_ConcurrentAccess(t *testing.T) {
@@ -423,7 +487,7 @@ func TestNotebookService_ConcurrentAccess(t *testing.T) {
 	embedder := &MockEmbedder{}
 	cfg := &configs.LLMConfig{}
 
-	svc := NewNotebookService(repo, store, embedder, nil, cfg)
+	svc := NewNotebookService(repo, store, embedder, nil, cfg, nil)
 
 	ctx := context.Background()
 	userID := "test-user-1"

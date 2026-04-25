@@ -10,7 +10,6 @@ import React, {
   useEffect,
   useMemo,
 } from 'react';
-import type { KeyboardEvent } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -31,7 +30,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { HighlightLayer, HighlightMarker } from './HighlightLayer';
 import { useNotebookStore } from '@/store/useNotebookStore';
 import type { HighlightTarget } from '@/types/api';
-import type { PDFPageProxy } from 'pdfjs-dist';
+
+type LoadedPdfPage = Parameters<NonNullable<React.ComponentProps<typeof Page>['onLoadSuccess']>>[0];
 
 // 配置 PDF.js worker
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -86,6 +86,16 @@ export function PdfViewer({
     return [highlightTarget];
   }, [highlightTarget, documentId]);
 
+  useEffect(() => {
+    if (!highlightTarget || highlightTarget.documentId !== documentId) {
+      return;
+    }
+    setState((prev) => ({
+      ...prev,
+      currentPage: Math.max(1, highlightTarget.pageNumber),
+    }));
+  }, [highlightTarget, documentId]);
+
   // ============================================================
   // 文档加载成功
   // ============================================================
@@ -106,7 +116,7 @@ export function PdfViewer({
   // 页面加载成功
   // ============================================================
 
-  const onPageLoadSuccess = useCallback((page: PDFPageProxy) => {
+  const onPageLoadSuccess = useCallback((page: LoadedPdfPage) => {
     const viewport = page.getViewport({ scale: 1 });
     setState((prev) => ({
       ...prev,
@@ -186,7 +196,7 @@ export function PdfViewer({
   // ============================================================
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'ArrowLeft') {
         goToPrevPage();
       } else if (e.key === 'ArrowRight') {

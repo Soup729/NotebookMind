@@ -19,13 +19,18 @@ const (
 
 // NotebookChunk represents a chunk stored in Milvus for NotebookLM
 type NotebookChunk struct {
-	ID          int64   `json:"id"`
-	NotebookID  string  `json:"notebook_id"`
-	DocumentID  string  `json:"document_id"`
-	PageNumber  int64   `json:"page_number"`
-	ChunkIndex  int64   `json:"chunk_index"`
-	Content     string  `json:"content"`
-	Vector      []float32 `json:"vector"`
+	ID          int64       `json:"id"`
+	NotebookID  string      `json:"notebook_id"`
+	DocumentID  string      `json:"document_id"`
+	PageNumber  int64       `json:"page_number"`
+	ChunkIndex  int64       `json:"chunk_index"`
+	Content     string      `json:"content"`
+	ChunkType   string      `json:"chunk_type,omitempty"`
+	ChunkRole   string      `json:"chunk_role,omitempty"`
+	ParentID    string      `json:"parent_id,omitempty"`
+	SectionPath string      `json:"section_path,omitempty"` // JSON array
+	BBox        string      `json:"bbox,omitempty"`         // JSON array
+	Vector      []float32   `json:"vector"`
 }
 
 // NotebookVectorStore defines the interface for notebook vector operations
@@ -38,6 +43,8 @@ type NotebookVectorStore interface {
 	DeleteByDocument(ctx context.Context, documentID string) error
 	// DeleteByNotebook removes all chunks for a notebook
 	DeleteByNotebook(ctx context.Context, notebookID string) error
+	// GetAllChunks retrieves all chunks (used for BM25 index warmup)
+	GetAllChunks(ctx context.Context) ([]NotebookChunk, error)
 }
 
 // notebookMilvusRepo implements NotebookVectorStore using Milvus
@@ -109,6 +116,11 @@ func (m *notebookMilvusRepo) InsertChunks(ctx context.Context, chunks []Notebook
 	pageNumbers := make([]int64, len(chunks))
 	chunkIndexes := make([]int64, len(chunks))
 	contents := make([]string, len(chunks))
+	chunkTypes := make([]string, len(chunks))
+	chunkRoles := make([]string, len(chunks))
+	parentIDs := make([]string, len(chunks))
+	sectionPaths := make([]string, len(chunks))
+	bboxes := make([]string, len(chunks))
 
 	for i, chunk := range chunks {
 		notebookIDs[i] = chunk.NotebookID
@@ -116,6 +128,11 @@ func (m *notebookMilvusRepo) InsertChunks(ctx context.Context, chunks []Notebook
 		pageNumbers[i] = chunk.PageNumber
 		chunkIndexes[i] = chunk.ChunkIndex
 		contents[i] = chunk.Content
+		chunkTypes[i] = chunk.ChunkType
+		chunkRoles[i] = chunk.ChunkRole
+		parentIDs[i] = chunk.ParentID
+		sectionPaths[i] = chunk.SectionPath
+		bboxes[i] = chunk.BBox
 	}
 
 	_, err := m.cli.Insert(
@@ -127,6 +144,11 @@ func (m *notebookMilvusRepo) InsertChunks(ctx context.Context, chunks []Notebook
 		entity.NewColumnInt64("page_number", pageNumbers),
 		entity.NewColumnInt64("chunk_index", chunkIndexes),
 		entity.NewColumnVarChar("content", contents),
+		entity.NewColumnVarChar("chunk_type", chunkTypes),
+		entity.NewColumnVarChar("chunk_role", chunkRoles),
+		entity.NewColumnVarChar("parent_id", parentIDs),
+		entity.NewColumnVarChar("section_path", sectionPaths),
+		entity.NewColumnVarChar("bbox", bboxes),
 		entity.NewColumnFloatVector("vector", m.dimension, vectors),
 	)
 	if err != nil {
@@ -155,12 +177,17 @@ func (m *notebookMilvusRepo) Search(ctx context.Context, queryVector []float32, 
 		return nil, nil, fmt.Errorf("build Milvus search params: %w", err)
 	}
 
+	outputFields := []string{
+		"notebook_id", "document_id", "page_number", "chunk_index", "content",
+		"chunk_type", "chunk_role", "parent_id", "section_path", "bbox",
+	}
+
 	results, err := m.cli.Search(
 		ctx,
 		m.colName,
 		nil,
 		expr,
-		[]string{"notebook_id", "document_id", "page_number", "chunk_index", "content"},
+		outputFields,
 		[]entity.Vector{entity.FloatVector(queryVector)},
 		"vector",
 		entity.L2,
@@ -180,6 +207,11 @@ func (m *notebookMilvusRepo) Search(ctx context.Context, queryVector []float32, 
 		pageCol, _ := result.Fields.GetColumn("page_number").(*entity.ColumnInt64)
 		chunkIdxCol, _ := result.Fields.GetColumn("chunk_index").(*entity.ColumnInt64)
 		contentCol, _ := result.Fields.GetColumn("content").(*entity.ColumnVarChar)
+		chunkTypeCol, _ := result.Fields.GetColumn("chunk_type").(*entity.ColumnVarChar)
+		chunkRoleCol, _ := result.Fields.GetColumn("chunk_role").(*entity.ColumnVarChar)
+		parentIDCol, _ := result.Fields.GetColumn("parent_id").(*entity.ColumnVarChar)
+		sectionPathCol, _ := result.Fields.GetColumn("section_path").(*entity.ColumnVarChar)
+		bboxCol, _ := result.Fields.GetColumn("bbox").(*entity.ColumnVarChar)
 
 		for i := 0; i < result.ResultCount; i++ {
 			notebookIDVal, _ := notebookCol.ValueByIdx(i)
@@ -187,6 +219,11 @@ func (m *notebookMilvusRepo) Search(ctx context.Context, queryVector []float32, 
 			pageNum, _ := pageCol.ValueByIdx(i)
 			chunkIdx, _ := chunkIdxCol.ValueByIdx(i)
 			content, _ := contentCol.ValueByIdx(i)
+			chunkType, _ := chunkTypeCol.ValueByIdx(i)
+			chunkRole, _ := chunkRoleCol.ValueByIdx(i)
+			parentID, _ := parentIDCol.ValueByIdx(i)
+			sectionPath, _ := sectionPathCol.ValueByIdx(i)
+			bbox, _ := bboxCol.ValueByIdx(i)
 
 			chunks = append(chunks, NotebookChunk{
 				NotebookID:  notebookIDVal,
@@ -194,6 +231,11 @@ func (m *notebookMilvusRepo) Search(ctx context.Context, queryVector []float32, 
 				PageNumber:  pageNum,
 				ChunkIndex:  chunkIdx,
 				Content:     content,
+				ChunkType:   chunkType,
+				ChunkRole:   chunkRole,
+				ParentID:    parentID,
+				SectionPath: sectionPath,
+				BBox:        bbox,
 			})
 			scores = append(scores, result.Scores[i])
 		}
@@ -218,6 +260,57 @@ func (m *notebookMilvusRepo) DeleteByNotebook(ctx context.Context, notebookID st
 		return fmt.Errorf("delete notebook chunks from Milvus: %w", err)
 	}
 	return nil
+}
+
+// GetAllChunks retrieves all chunks for BM25 index warmup
+func (m *notebookMilvusRepo) GetAllChunks(ctx context.Context) ([]NotebookChunk, error) {
+	outputFields := []string{
+		"document_id", "content", "chunk_index",
+	}
+
+	// Query all records
+	resultSet, err := m.cli.Query(
+		ctx,
+		m.colName,
+		nil,
+		"id > 0", // match all records
+		outputFields,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query all chunks from Milvus: %w", err)
+	}
+
+	if resultSet.Len() == 0 {
+		return nil, nil
+	}
+
+	docCol, ok := resultSet.GetColumn("document_id").(*entity.ColumnVarChar)
+	if !ok || docCol == nil {
+		return nil, nil
+	}
+	contentCol, ok := resultSet.GetColumn("content").(*entity.ColumnVarChar)
+	if !ok || contentCol == nil {
+		return nil, nil
+	}
+	chunkIdxCol, _ := resultSet.GetColumn("chunk_index").(*entity.ColumnInt64)
+
+	chunks := make([]NotebookChunk, 0, docCol.Len())
+	for i := 0; i < docCol.Len(); i++ {
+		docID, _ := docCol.ValueByIdx(i)
+		content, _ := contentCol.ValueByIdx(i)
+		var chunkIdx int64
+		if chunkIdxCol != nil {
+			chunkIdx, _ = chunkIdxCol.ValueByIdx(i)
+		}
+
+		chunks = append(chunks, NotebookChunk{
+			DocumentID: docID,
+			Content:    content,
+			ChunkIndex: chunkIdx,
+		})
+	}
+
+	return chunks, nil
 }
 
 func buildNotebookSearchExpr(notebookID string, docIDs []string) string {
@@ -261,14 +354,26 @@ func ensureNotebookCollection(ctx context.Context, cli client.Client, collection
 		return fmt.Errorf("describe collection: %w", err)
 	}
 
-	return validateNotebookSchema(description, dimension)
+	if err := validateNotebookSchema(description, dimension); err != nil {
+		// Schema 不兼容，删除旧 collection 重建
+		zap.L().Warn("notebook collection schema is incompatible, dropping and recreating",
+			zap.String("collection", collectionName),
+			zap.Error(err),
+		)
+		if dropErr := cli.DropCollection(ctx, collectionName); dropErr != nil {
+			return fmt.Errorf("drop incompatible notebook collection %s: %w", collectionName, dropErr)
+		}
+		return createNotebookCollection(ctx, cli, collectionName, dimension)
+	}
+
+	return nil
 }
 
 // createNotebookCollection creates a new collection with notebook-specific schema
 func createNotebookCollection(ctx context.Context, cli client.Client, collectionName string, dimension int) error {
 	schemaDef := entity.NewSchema().
 		WithName(collectionName).
-		WithDescription("NotebookLM document chunks with page numbers").
+		WithDescription("NotebookLM document chunks with structured metadata").
 		WithAutoID(true).
 		WithField(entity.NewField().WithName("id").WithDataType(entity.FieldTypeInt64).WithIsPrimaryKey(true).WithIsAutoID(true)).
 		WithField(entity.NewField().WithName("notebook_id").WithDataType(entity.FieldTypeVarChar).WithMaxLength(128)).
@@ -276,6 +381,11 @@ func createNotebookCollection(ctx context.Context, cli client.Client, collection
 		WithField(entity.NewField().WithName("page_number").WithDataType(entity.FieldTypeInt64)).
 		WithField(entity.NewField().WithName("chunk_index").WithDataType(entity.FieldTypeInt64)).
 		WithField(entity.NewField().WithName("content").WithDataType(entity.FieldTypeVarChar).WithMaxLength(65535)).
+		WithField(entity.NewField().WithName("chunk_type").WithDataType(entity.FieldTypeVarChar).WithMaxLength(32)).
+		WithField(entity.NewField().WithName("chunk_role").WithDataType(entity.FieldTypeVarChar).WithMaxLength(16)).
+		WithField(entity.NewField().WithName("parent_id").WithDataType(entity.FieldTypeVarChar).WithMaxLength(128)).
+		WithField(entity.NewField().WithName("section_path").WithDataType(entity.FieldTypeVarChar).WithMaxLength(1024)).
+		WithField(entity.NewField().WithName("bbox").WithDataType(entity.FieldTypeVarChar).WithMaxLength(256)).
 		WithField(entity.NewField().WithName("vector").WithDataType(entity.FieldTypeFloatVector).WithDim(int64(dimension)))
 
 	if err := cli.CreateCollection(ctx, schemaDef, entity.DefaultShardNumber); err != nil {
@@ -302,12 +412,17 @@ func validateNotebookSchema(collection *entity.Collection, expectedDimension int
 	}
 
 	requiredFields := map[string]entity.FieldType{
-		"notebook_id":  entity.FieldTypeVarChar,
-		"document_id":  entity.FieldTypeVarChar,
-		"page_number":  entity.FieldTypeInt64,
-		"chunk_index":  entity.FieldTypeInt64,
-		"content":      entity.FieldTypeVarChar,
-		"vector":       entity.FieldTypeFloatVector,
+		"notebook_id":   entity.FieldTypeVarChar,
+		"document_id":   entity.FieldTypeVarChar,
+		"page_number":   entity.FieldTypeInt64,
+		"chunk_index":   entity.FieldTypeInt64,
+		"content":       entity.FieldTypeVarChar,
+		"chunk_type":    entity.FieldTypeVarChar,
+		"chunk_role":    entity.FieldTypeVarChar,
+		"parent_id":     entity.FieldTypeVarChar,
+		"section_path":  entity.FieldTypeVarChar,
+		"bbox":          entity.FieldTypeVarChar,
+		"vector":        entity.FieldTypeFloatVector,
 	}
 
 	fieldsByName := make(map[string]*entity.Field)

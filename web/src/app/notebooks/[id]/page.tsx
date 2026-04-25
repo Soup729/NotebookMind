@@ -7,7 +7,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { ArrowLeft, Plus, Loader2, GripHorizontal, MessageSquare, Trash2, ChevronDown, Pencil, Check, X } from 'lucide-react';
+import { ArrowLeft, Plus, Loader2, GripHorizontal, MessageSquare, Trash2, ChevronDown, Pencil, Check, X, LayoutDashboard } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -22,6 +22,10 @@ import {
 import { SourcesPanel } from '@/components/layout/SourcesPanel';
 import { NotesPanel } from '@/components/layout/NotesPanel';
 import { ChatPanel } from '@/components/chat/ChatPanel';
+import { ExportDialog } from '@/components/export/ExportDialog';
+import { ExportFormatMenu } from '@/components/export/ExportFormatMenu';
+import { ExportTaskTray } from '@/components/export/ExportTaskTray';
+import { NotebookWorkspace } from '@/components/workspace/NotebookWorkspace';
 
 // PDF 查看器
 import { PdfViewer } from '@/components/pdf/PdfViewer';
@@ -35,7 +39,7 @@ import { useDocuments, useUploadDocument, useDeleteDocument, useUpdateNotebook }
 import { useSessions, useCreateSession, useDeleteSession } from '@/hooks/useNotebook';
 import { useNotebookStore } from '@/store/useNotebookStore';
 
-import type { Session, Document } from '@/types/api';
+import type { Session, Document, ExportFormat, NotebookArtifact } from '@/types/api';
 
 // ============================================================
 // 指南视图组件
@@ -122,6 +126,7 @@ export default function NotebookPage() {
     toggleDocumentSelection,
     setMainViewToPdf,
     setMainViewToGuide,
+    setMainViewToWorkspace,
   } = useNotebookStore();
 
   // 数据获取
@@ -148,6 +153,12 @@ export default function NotebookPage() {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
+
+  // 导出状态
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>('markdown');
+  const [exportRequirements, setExportRequirements] = useState('');
+  const [activeExportArtifactId, setActiveExportArtifactId] = useState<string | null>(null);
 
   // ChatPanel 高度拖动调整 (带记忆功能)
   const [chatHeight, setChatHeight] = useState(() => {
@@ -349,6 +360,36 @@ export default function NotebookPage() {
   }, [mainView, activePdfId, documents, setMainViewToPdf]);
 
   // ============================================================
+  // 导出
+  // ============================================================
+
+  const completedDocuments = documents.filter((doc) => doc.status === 'completed');
+
+  const openExportDialog = useCallback(
+    (format: ExportFormat, requirements = '') => {
+      if (completedDocuments.length === 0) {
+        toast.error('请先上传并等待文档处理完成');
+        return;
+      }
+      setExportFormat(format);
+      setExportRequirements(requirements);
+      setExportDialogOpen(true);
+    },
+    [completedDocuments.length]
+  );
+
+  const handleExportTaskStart = useCallback((artifact: NotebookArtifact) => {
+    setActiveExportArtifactId(artifact.id);
+  }, []);
+
+  const handleExportIntent = useCallback(
+    (intent: { format: ExportFormat; requirements: string }) => {
+      openExportDialog(intent.format, intent.requirements);
+    },
+    [openExportDialog]
+  );
+
+  // ============================================================
   // 笔记本改名
   // ============================================================
 
@@ -391,10 +432,10 @@ export default function NotebookPage() {
   // ============================================================
 
   const handleSourceClick = useCallback(
-    (source: { document_id: string; page_number: number; content: string }) => {
+    (source: { document_id: string; page_number: number; content: string; bounding_box?: [number, number, number, number] }) => {
       setMainViewToPdf(source.document_id, {
         pageNumber: source.page_number,
-        boundingBox: [0, 0, 0, 0],
+        boundingBox: source.bounding_box && source.bounding_box.length === 4 ? source.bounding_box : [0, 0, 0, 0],
         sourceId: source.document_id,
         documentId: source.document_id,
         documentName: documents.find((d) => d.id === source.document_id)?.file_name || '',
@@ -543,6 +584,19 @@ export default function NotebookPage() {
             </DropdownMenu>
 
             {/* 主视图切换 */}
+            <ExportFormatMenu
+              disabled={completedDocuments.length === 0}
+              onSelect={(format) => openExportDialog(format)}
+            />
+            <Button
+              variant={mainView === 'workspace' ? 'secondary' : 'ghost'}
+              size="sm"
+              onClick={() => setMainViewToWorkspace()}
+              className="gap-2"
+            >
+              <LayoutDashboard className="w-4 h-4" />
+              工作台
+            </Button>
             <Button
               variant={mainView === 'guide' ? 'secondary' : 'ghost'}
               size="sm"
@@ -569,7 +623,15 @@ export default function NotebookPage() {
 
         {/* 主视图内容 */}
         <main className="flex-1 overflow-hidden">
-          {mainView === 'guide' ? (
+          {mainView === 'workspace' ? (
+            <NotebookWorkspace
+              notebookId={notebookId}
+              session={currentSession}
+              documents={documents}
+              selectedDocumentIds={selectedDocumentIds}
+              onOpenExport={openExportDialog}
+            />
+          ) : mainView === 'guide' ? (
             <GuideView
               notebookId={notebookId}
               documents={documents}
@@ -628,6 +690,7 @@ export default function NotebookPage() {
                 sessionId={currentSession?.id || null}
                 onSessionCreate={handleCreateSession}
                 pendingQuery={pendingSuggestedQuery}
+                onExportIntent={handleExportIntent}
                 className="h-full border-0 rounded-none"
               />
             )}
@@ -643,6 +706,22 @@ export default function NotebookPage() {
           notebookId={notebookId}
         />
       </div>
+
+      <ExportDialog
+        open={exportDialogOpen}
+        notebookId={notebookId}
+        documents={documents}
+        selectedDocumentIds={selectedDocumentIds}
+        initialFormat={exportFormat}
+        initialRequirements={exportRequirements}
+        onClose={() => setExportDialogOpen(false)}
+        onTaskStart={handleExportTaskStart}
+      />
+      <ExportTaskTray
+        notebookId={notebookId}
+        artifactId={activeExportArtifactId}
+        onClear={() => setActiveExportArtifactId(null)}
+      />
     </div>
   );
 }

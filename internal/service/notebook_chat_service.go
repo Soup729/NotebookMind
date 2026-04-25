@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"NotebookAI/internal/configs"
 	"NotebookAI/internal/models"
 	"NotebookAI/internal/observability"
 	"NotebookAI/internal/repository"
@@ -18,13 +20,18 @@ import (
 
 // NotebookChatSource represents a source chunk for chat response
 type NotebookChatSource struct {
-	NotebookID   string  `json:"notebook_id"`
-	DocumentID   string  `json:"document_id"`
-	DocumentName string  `json:"document_name"`
-	PageNumber   int64   `json:"page_number"`
-	ChunkIndex   int64   `json:"chunk_index"`
-	Content      string  `json:"content"`
-	Score        float32 `json:"score"`
+	NotebookID   string    `json:"notebook_id"`
+	DocumentID   string    `json:"document_id"`
+	DocumentName string    `json:"document_name"`
+	PageNumber   int64     `json:"page_number"`
+	ChunkIndex   int64     `json:"chunk_index"`
+	Content      string    `json:"content"`
+	Score        float32   `json:"score"`
+	ChunkType    string    `json:"chunk_type,omitempty"`
+	SectionPath  []string  `json:"section_path,omitempty"`
+	BoundingBox  []float32 `json:"bounding_box,omitempty"`
+	VisualPath   string    `json:"visual_path,omitempty"`
+	VisualType   string    `json:"visual_type,omitempty"`
 }
 
 // NotebookChatReply represents a streaming chat response
@@ -34,6 +41,18 @@ type NotebookChatReply struct {
 	Content      string               `json:"content"`
 	Sources      []NotebookChatSource `json:"sources"`
 	PromptTokens int                  `json:"prompt_tokens"`
+}
+
+func (s NotebookChatSource) VisualEvidence() (string, string) {
+	path := strings.TrimSpace(s.VisualPath)
+	visualType := strings.TrimSpace(s.VisualType)
+	if visualType == "" {
+		visualType = extractVisualTypeMarker(s.Content)
+	}
+	if path == "" {
+		path = extractVisualPathMarker(s.Content)
+	}
+	return path, visualType
 }
 
 // NotebookChatService defines operations for notebook-based chat
@@ -51,6 +70,9 @@ type NotebookChatService interface {
 
 	// Search within notebook
 	SearchNotebook(ctx context.Context, userID, notebookID, query string, topK int) ([]NotebookChatSource, error)
+	GetSessionMemory(ctx context.Context, userID, sessionID string) (*SessionMemory, error)
+	RefreshSessionMemory(ctx context.Context, userID, sessionID string) (*SessionMemory, error)
+	ClearSessionMemory(ctx context.Context, userID, sessionID string) error
 }
 
 // notebookChatService implements NotebookChatService
@@ -62,6 +84,16 @@ type notebookChatService struct {
 	llm           llms.Model
 	embedder      embeddings.Embedder
 	retrievalTopK int
+	// Phase 2: Hybrid RAG
+	hybridSearch     HybridSearchService
+	intentRewrite    IntentRewriteService
+	bm25Index        *BM25Index
+	trustWorkflow    TrustWorkflow
+	trustConfig      *configs.TrustWorkflowConfig
+	citationGuard    *configs.CitationGuardConfig
+	visualAnswerer   LLMService
+	multimodalConfig *configs.MultimodalConfig
+	memoryService    SessionMemoryService
 }
 
 // NewNotebookChatService creates a new NotebookChatService
@@ -73,15 +105,33 @@ func NewNotebookChatService(
 	llm llms.Model,
 	embedder embeddings.Embedder,
 	retrievalTopK int,
+	hybridSearch HybridSearchService,
+	intentRewrite IntentRewriteService,
+	bm25Index *BM25Index,
+	trustWorkflow TrustWorkflow,
+	trustConfig *configs.TrustWorkflowConfig,
+	citationGuard *configs.CitationGuardConfig,
+	visualAnswerer LLMService,
+	multimodalConfig *configs.MultimodalConfig,
+	memoryService SessionMemoryService,
 ) NotebookChatService {
 	return &notebookChatService{
-		notebookRepo:  notebookRepo,
-		docRepo:       docRepo,
-		vectorStore:   vectorStore,
-		chatRepo:      chatRepo,
-		llm:           llm,
-		embedder:      embedder,
-		retrievalTopK: retrievalTopK,
+		notebookRepo:     notebookRepo,
+		docRepo:          docRepo,
+		vectorStore:      vectorStore,
+		chatRepo:         chatRepo,
+		llm:              llm,
+		embedder:         embedder,
+		retrievalTopK:    retrievalTopK,
+		hybridSearch:     hybridSearch,
+		intentRewrite:    intentRewrite,
+		bm25Index:        bm25Index,
+		trustWorkflow:    trustWorkflow,
+		trustConfig:      trustConfig,
+		citationGuard:    citationGuard,
+		visualAnswerer:   visualAnswerer,
+		multimodalConfig: multimodalConfig,
+		memoryService:    memoryService,
 	}
 }
 
@@ -94,7 +144,7 @@ func (s *notebookChatService) CreateSession(ctx context.Context, userID, noteboo
 	session := &models.ChatSession{
 		ID:            uuid.NewString(),
 		UserID:        userID,
-		NotebookID:   notebookID,
+		NotebookID:    notebookID,
 		Title:         title,
 		LastMessageAt: now,
 	}
@@ -193,38 +243,60 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 		}
 	}
 
-	// Step 4: Retrieve relevant chunks from Milvus (仅 RAG 模式下执行)
+	// Step 4: Retrieve relevant chunks (仅 RAG 模式下执行)
 	retrievalTimer := observability.NewStopwatch()
 	var sources []NotebookChatSource
+	var hybridResults []HybridResult
 
 	if isRAGMode {
-		// First embed the query
-		queryVector, err := s.embedder.EmbedQuery(ctx, question)
-		if err != nil {
-			metrics.ErrorType = "embed_query_failed"
-			metrics.ErrorMsg = err.Error()
+		if s.hybridSearch != nil {
+			// Phase 2: 混合检索路径
+			hybridResults, err = s.hybridSearch.SearchWithOptions(ctx, HybridSearchOptions{
+				Query:       question,
+				UserID:      userID,
+				SessionID:   sessionID,
+				NotebookID:  session.NotebookID,
+				DocumentIDs: docIDs,
+				TopK:        s.retrievalTopK,
+			})
 			metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
-			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
-			observability.LogChatRequest(metrics)
-			return fmt.Errorf("embed query: %w", err)
-		}
+			if err != nil {
+				metrics.ErrorType = "hybrid_search_failed"
+				metrics.ErrorMsg = err.Error()
+				metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+				observability.LogChatRequest(metrics)
+				return fmt.Errorf("hybrid search: %w", err)
+			}
+			sources = hybridResultsToNotebookSources(hybridResults, s, ctx, userID)
+		} else {
+			// 降级：纯 Dense 检索
+			queryVector, err := s.embedder.EmbedQuery(ctx, question)
+			if err != nil {
+				metrics.ErrorType = "embed_query_failed"
+				metrics.ErrorMsg = err.Error()
+				metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+				metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+				observability.LogChatRequest(metrics)
+				return fmt.Errorf("embed query: %w", err)
+			}
 
-		chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
-		metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
-		if err != nil {
-			metrics.ErrorType = "vector_search_failed"
-			metrics.ErrorMsg = err.Error()
-			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
-			observability.LogChatRequest(metrics)
-			return fmt.Errorf("search chunks: %w", err)
-		}
+			chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
+			metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+			if err != nil {
+				metrics.ErrorType = "vector_search_failed"
+				metrics.ErrorMsg = err.Error()
+				metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+				observability.LogChatRequest(metrics)
+				return fmt.Errorf("search chunks: %w", err)
+			}
 
-		// Step 5: Build sources with document names
-		sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
+			sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
+		}
 	}
 
 	// Step 6: Build prompt with strict format
-	prompt := s.buildPrompt(history, sources, question)
+	memoryPrompt := s.memoryPrompt(ctx, userID, sessionID)
+	prompt := s.buildPrompt(history, sources, question, memoryPrompt)
 	promptTokens := estimateTokens(prompt)
 
 	// 记录检索事件
@@ -264,7 +336,16 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 
 	// LLM 生成阶段计时
 	llmTimer := observability.NewStopwatch()
-	response, err := llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
+	response, err := s.generateNotebookAnswer(ctx, prompt, TrustWorkflowInput{
+		Question:      question,
+		UserID:        userID,
+		SessionID:     sessionID,
+		NotebookID:    session.NotebookID,
+		DocumentIDs:   docIDs,
+		History:       history,
+		SearchResults: hybridResults,
+		Sources:       sources,
+	})
 	metrics.LLMLatencyMs = llmTimer.ElapsedMs()
 	if err != nil {
 		metrics.ErrorType = "llm_generation_failed"
@@ -311,6 +392,7 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 	if err := s.chatRepo.SaveMessage(ctx, assistantMessage); err != nil {
 		zap.L().Error("save assistant message failed", zap.Error(err), zap.String("session_id", sessionID))
 	}
+	s.refreshMemoryAsync(userID, sessionID)
 
 	// Update session activity
 	title := session.Title
@@ -365,26 +447,44 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 		}
 	}
 
-	// Step 3: Retrieve relevant chunks from Milvus（仅 RAG 模式）
+	// Step 3: Retrieve relevant chunks（仅 RAG 模式）
 	var sources []NotebookChatSource
+	var hybridResults []HybridResult
 
 	if isRAGMode {
-		queryVector, err := s.embedder.EmbedQuery(ctx, question)
-		if err != nil {
-			return fmt.Errorf("embed query: %w", err)
-		}
+		if s.hybridSearch != nil {
+			// Phase 2: 混合检索路径
+			hybridResults, err = s.hybridSearch.SearchWithOptions(ctx, HybridSearchOptions{
+				Query:       question,
+				UserID:      userID,
+				SessionID:   sessionID,
+				NotebookID:  session.NotebookID,
+				DocumentIDs: docIDs,
+				TopK:        s.retrievalTopK,
+			})
+			if err != nil {
+				return fmt.Errorf("hybrid search: %w", err)
+			}
+			sources = hybridResultsToNotebookSources(hybridResults, s, ctx, userID)
+		} else {
+			// 降级：纯 Dense 检索
+			queryVector, err := s.embedder.EmbedQuery(ctx, question)
+			if err != nil {
+				return fmt.Errorf("embed query: %w", err)
+			}
 
-		chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
-		if err != nil {
-			return fmt.Errorf("search chunks: %w", err)
-		}
+			chunks, scores, err := s.vectorStore.Search(ctx, queryVector, s.retrievalTopK, session.NotebookID, docIDs)
+			if err != nil {
+				return fmt.Errorf("search chunks: %w", err)
+			}
 
-		// Step 4: Build sources with batch document name lookup
-		sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
+			sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
+		}
 	}
 
 	// Step 5: Build prompt
-	prompt := s.buildPrompt(history, sources, question)
+	memoryPrompt := s.memoryPrompt(ctx, userID, sessionID)
+	prompt := s.buildPrompt(history, sources, question, memoryPrompt)
 
 	// Step 6: Save user message FIRST (before LLM call) — 确保历史记录完整
 	messageID := uuid.NewString()
@@ -413,7 +513,16 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 		return fmt.Errorf("client disconnected")
 	}
 
-	response, err := llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
+	response, err := s.generateNotebookAnswer(ctx, prompt, TrustWorkflowInput{
+		Question:      question,
+		UserID:        userID,
+		SessionID:     sessionID,
+		NotebookID:    session.NotebookID,
+		DocumentIDs:   docIDs,
+		History:       history,
+		SearchResults: hybridResults,
+		Sources:       sources,
+	})
 	if err != nil {
 		return fmt.Errorf("generate response: %w", err)
 	}
@@ -446,6 +555,7 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 	if err := s.chatRepo.SaveMessage(ctx, assistantMessage); err != nil {
 		zap.L().Error("save assistant message failed", zap.Error(err), zap.String("session_id", sessionID))
 	}
+	s.refreshMemoryAsync(userID, sessionID)
 
 	// Update session activity
 	title := session.Title
@@ -457,11 +567,170 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 	return nil
 }
 
+func (s *notebookChatService) shouldUseTrustWorkflow(question string, history []models.ChatMessage) bool {
+	if s.trustWorkflow == nil || s.trustConfig == nil || !s.trustConfig.Enabled {
+		return false
+	}
+	plan := BuildTrustPlan(question, history)
+	return !s.trustConfig.HighRiskOnly || plan.HasHighRisk()
+}
+
+func (s *notebookChatService) generateNotebookAnswer(ctx context.Context, prompt string, input TrustWorkflowInput) (string, error) {
+	if answer, ok := s.generateVisualNotebookAnswer(ctx, input); ok {
+		return answer, nil
+	}
+	if s.shouldUseTrustWorkflow(input.Question, input.History) && len(input.Sources) > 0 {
+		output, err := s.trustWorkflow.Run(ctx, input)
+		if err == nil && strings.TrimSpace(output.Answer) != "" {
+			zap.L().Info("trust workflow generated notebook answer",
+				zap.Bool("repaired", output.Repaired),
+				zap.Bool("verified", output.Verification.Passed),
+				zap.Int("evidence_count", len(output.EvidencePack.Items)),
+			)
+			return strings.TrimSpace(output.Answer), nil
+		}
+		zap.L().Warn("trust workflow failed, falling back to standard notebook generation", zap.Error(err))
+	}
+	response, err := llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(s.applyCitationGuard(ctx, response, input)), nil
+}
+
+func (s *notebookChatService) generateVisualNotebookAnswer(ctx context.Context, input TrustWorkflowInput) (string, bool) {
+	cfg := s.multimodalConfig
+	if cfg == nil || !cfg.Enabled || !cfg.VisualGenerationEnabled || s.visualAnswerer == nil {
+		return "", false
+	}
+	if !isVisualQuestion(input.Question) {
+		return "", false
+	}
+	source, path, ok := selectVisualSource(input.Sources, cfg.MinVisualScore)
+	if !ok {
+		return "", false
+	}
+	imageData, err := os.ReadFile(path)
+	if err != nil {
+		zap.L().Warn("visual answer image read failed, falling back to text generation",
+			zap.String("visual_path", path),
+			zap.Error(err),
+		)
+		return "", false
+	}
+	visionPrompt := buildVisualAnswerPrompt(input.Question, input.Sources, source)
+	mimeType := mimeTypeFromPath(path)
+	generated, err := s.visualAnswerer.AnswerWithImage(ctx, visionPrompt, imageData, mimeType)
+	if err != nil || generated == nil || strings.TrimSpace(generated.Text) == "" {
+		zap.L().Warn("visual answer generation failed, falling back to text generation", zap.Error(err))
+		return "", false
+	}
+	return strings.TrimSpace(s.applyCitationGuard(ctx, generated.Text, input)), true
+}
+
+func (s *notebookChatService) applyCitationGuard(ctx context.Context, answer string, input TrustWorkflowInput) string {
+	cfg := s.citationGuard
+	if cfg == nil || !cfg.Enabled || len(input.Sources) == 0 {
+		return strings.TrimSpace(answer)
+	}
+
+	pack := BuildEvidencePackFromNotebookSources(input.Sources)
+	if len(pack.Items) == 0 {
+		return citedInsufficientAnswer(pack)
+	}
+
+	plan := BuildTrustPlan(input.Question, input.History)
+	if cfg.HighRiskOnly && !plan.HasHighRisk() {
+		return RenderEvidenceCitations(answer, pack)
+	}
+
+	options := CitationGuardOptions{
+		RequireParagraphCitations: cfg.RequireParagraphCitations,
+		ValidateNumbers:           cfg.ValidateNumbers,
+		ValidateEntityPhrases:     cfg.ValidateEntityPhrases,
+		MinCitationCoverage:       cfg.MinCitationCoverage,
+	}
+	result := ValidateCitationBoundAnswer(answer, pack, options)
+	if result.Passed {
+		return RenderEvidenceCitations(answer, pack)
+	}
+
+	if cfg.RepairEnabled && cfg.MaxRepairAttempts > 0 {
+		repaired, err := s.repairCitationBoundAnswer(ctx, answer, input, pack, result)
+		if err == nil {
+			repairedResult := ValidateCitationBoundAnswer(repaired, pack, options)
+			if repairedResult.Passed {
+				return RenderEvidenceCitations(repaired, pack)
+			}
+			zap.L().Warn("citation guard repair did not pass validation",
+				zap.Int("issue_count", len(repairedResult.Issues)),
+				zap.Float64("coverage", repairedResult.CitationCoverage),
+			)
+		} else {
+			zap.L().Warn("citation guard repair failed", zap.Error(err))
+		}
+	}
+
+	if cfg.FailClosedForHighRisk || plan.HasHighRisk() {
+		return citedInsufficientAnswer(pack)
+	}
+	return RenderEvidenceCitations(answer, pack)
+}
+
+func (s *notebookChatService) repairCitationBoundAnswer(ctx context.Context, answer string, input TrustWorkflowInput, pack EvidencePack, result CitationGuardResult) (string, error) {
+	var issueLines []string
+	for _, issue := range result.Issues {
+		issueLines = append(issueLines, fmt.Sprintf("- %s: %s", issue.Type, issue.Detail))
+	}
+	prompt := fmt.Sprintf(`Repair the answer so every factual paragraph is supported by evidence IDs.
+
+Rules:
+- Use only evidence IDs like [E1].
+- Do not output [Source: ...] directly.
+- Remove or soften unsupported claims.
+- If evidence is insufficient, say exactly: The provided documents do not contain sufficient information to answer this question.
+
+Question:
+%s
+
+Evidence:
+%s
+
+Validation issues:
+%s
+
+Previous answer:
+%s
+`, input.Question, pack.FormatForPrompt(), strings.Join(issueLines, "\n"), answer)
+
+	return llms.GenerateFromSinglePrompt(ctx, s.llm, prompt)
+}
+
 func (s *notebookChatService) SearchNotebook(ctx context.Context, userID, notebookID, query string, topK int) ([]NotebookChatSource, error) {
 	if topK <= 0 {
 		topK = s.retrievalTopK
 	}
 
+	if s.hybridSearch != nil {
+		// Phase 2: 混合检索路径
+		docIDs, err := s.notebookRepo.GetDocumentIDs(ctx, notebookID)
+		if err != nil {
+			return nil, fmt.Errorf("get notebook documents: %w", err)
+		}
+		hybridResults, err := s.hybridSearch.SearchWithOptions(ctx, HybridSearchOptions{
+			Query:       query,
+			UserID:      userID,
+			NotebookID:  notebookID,
+			DocumentIDs: docIDs,
+			TopK:        topK,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("hybrid search: %w", err)
+		}
+		return hybridResultsToNotebookSources(hybridResults, s, ctx, userID), nil
+	}
+
+	// 降级：纯 Dense 检索
 	if s.vectorStore == nil {
 		return nil, fmt.Errorf("vector store not available")
 	}
@@ -505,7 +774,41 @@ func (s *notebookChatService) SearchNotebook(ctx context.Context, userID, notebo
 }
 
 // buildPrompt constructs the prompt with strict format for source citations
-func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources []NotebookChatSource, question string) string {
+func (s *notebookChatService) memoryPrompt(ctx context.Context, userID, sessionID string) string {
+	if s.memoryService == nil {
+		return ""
+	}
+	return s.memoryService.MemoryPrompt(ctx, userID, sessionID)
+}
+
+func (s *notebookChatService) refreshMemoryAsync(userID, sessionID string) {
+	if s.memoryService != nil {
+		s.memoryService.MaybeRefreshAsync(userID, sessionID)
+	}
+}
+
+func (s *notebookChatService) GetSessionMemory(ctx context.Context, userID, sessionID string) (*SessionMemory, error) {
+	if s.memoryService == nil {
+		return &SessionMemory{}, nil
+	}
+	return s.memoryService.GetMemory(ctx, userID, sessionID)
+}
+
+func (s *notebookChatService) RefreshSessionMemory(ctx context.Context, userID, sessionID string) (*SessionMemory, error) {
+	if s.memoryService == nil {
+		return &SessionMemory{}, nil
+	}
+	return s.memoryService.RefreshMemory(ctx, userID, sessionID)
+}
+
+func (s *notebookChatService) ClearSessionMemory(ctx context.Context, userID, sessionID string) error {
+	if s.memoryService == nil {
+		return nil
+	}
+	return s.memoryService.ClearMemory(ctx, userID, sessionID)
+}
+
+func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources []NotebookChatSource, question string, memoryPrompt string) string {
 	var builder strings.Builder
 
 	if len(sources) == 0 {
@@ -514,22 +817,30 @@ func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources 
 		builder.WriteString("Answer questions using your general knowledge.\n\n")
 	} else {
 		// RAG 模式：基于文档检索结果回答
+		pack := BuildEvidencePackFromNotebookSources(sources)
 		builder.WriteString("You are an enterprise AI assistant similar to Google NotebookLM. ")
 		builder.WriteString("Answer questions strictly based on the provided context from documents.\n\n")
 
 		builder.WriteString("## Instructions\n")
-		builder.WriteString("1. Answer based ONLY on the provided context\n")
-		builder.WriteString("2. When referencing information, cite the source using [Source: DocumentName, Page X]\n")
-		builder.WriteString("3. If the context is insufficient, say: 'I cannot find relevant information in the provided documents'\n")
-		builder.WriteString("4. Be concise but comprehensive\n\n")
+		builder.WriteString("1. Answer based ONLY on the evidence blocks below. Do NOT use external knowledge.\n")
+		builder.WriteString("2. Every factual paragraph must end with one or more evidence IDs, for example [E1] or [E2][E5].\n")
+		builder.WriteString("3. Do not output [Source: ...] citations directly; use evidence IDs only.\n")
+		builder.WriteString("4. If a paragraph contains numbers, dates, names, rankings, risk ratings, or comparisons, cite the evidence block that directly contains those facts.\n")
+		builder.WriteString("5. If evidence is insufficient, say: 'The provided documents do not contain sufficient information to answer this question.'\n")
+		builder.WriteString("6. Keep paragraphs short so each paragraph has a clear evidence relationship.\n\n")
 
-		builder.WriteString("## Retrieved Context\n")
-		for i, src := range sources {
-			builder.WriteString(fmt.Sprintf("[%d] Source: %s (Page %d)\nContent: %s\n\n",
-				i+1,
-				src.DocumentName,
-				src.PageNumber+1, // Convert 0-indexed to 1-indexed
-				src.Content,
+		if strings.TrimSpace(memoryPrompt) != "" {
+			builder.WriteString(formatMemoryPromptForNotebookChat(memoryPrompt))
+			builder.WriteString("\n\n")
+		}
+
+		builder.WriteString("## Evidence Blocks\n")
+		for _, item := range pack.Items {
+			builder.WriteString(fmt.Sprintf("[%s] [Source: %s, Page %d]\nContent: %s\n\n",
+				item.ID,
+				item.DocumentName,
+				item.PageNumber+1,
+				item.Content,
 			))
 		}
 	}
@@ -548,6 +859,17 @@ func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources 
 	builder.WriteString("\n\n## Answer\n")
 
 	return builder.String()
+}
+
+func formatMemoryPromptForNotebookChat(memoryPrompt string) string {
+	memoryPrompt = strings.TrimSpace(memoryPrompt)
+	if memoryPrompt == "" {
+		return ""
+	}
+	if strings.Contains(memoryPrompt, "## Conversation Memory") {
+		return memoryPrompt
+	}
+	return "## Conversation Memory\nThis memory summarizes prior turns in this session and never overrides document evidence.\n- Summary: " + memoryPrompt
 }
 
 // buildSourcesFromChunks 从向量检索的 chunks 中构建带文档名的 sources 列表（避免重复代码）
@@ -577,6 +899,11 @@ func buildSourcesFromChunks(svc *notebookChatService, ctx context.Context, chunk
 			ChunkIndex:   chunk.ChunkIndex,
 			Content:      chunk.Content,
 			Score:        scores[i],
+			ChunkType:    chunk.ChunkType,
+			SectionPath:  parseStringArray(chunk.SectionPath),
+			BoundingBox:  parseFloat32Array(chunk.BBox),
+			VisualPath:   extractVisualPathMarker(chunk.Content),
+			VisualType:   extractVisualTypeMarker(chunk.Content),
 		})
 	}
 	return sources
@@ -593,4 +920,245 @@ func getNotebookSourceDocumentIDs(sources []NotebookChatSource) []string {
 		}
 	}
 	return ids
+}
+
+// hybridResultsToNotebookSources 将 HybridResult 转换为 NotebookChatSource
+func hybridResultsToNotebookSources(results []HybridResult, svc *notebookChatService, ctx context.Context, userID string) []NotebookChatSource {
+	sources := make([]NotebookChatSource, 0, len(results))
+
+	// 批量获取文档名
+	docIDSet := make(map[string]struct{}, len(results))
+	for _, r := range results {
+		if r.DocumentID != "" {
+			docIDSet[r.DocumentID] = struct{}{}
+		}
+	}
+	uniqueDocIDs := make([]string, 0, len(docIDSet))
+	for id := range docIDSet {
+		uniqueDocIDs = append(uniqueDocIDs, id)
+	}
+	docNameMap := svc.docRepo.GetNamesByIDs(ctx, userID, uniqueDocIDs)
+
+	for _, r := range results {
+		docName := docNameMap[r.DocumentID]
+		if docName == "" {
+			docName = "Unknown Document"
+		}
+		pageNumber := int64(0)
+		if v, ok := r.Metadata["page_number"]; ok {
+			switch tv := v.(type) {
+			case int:
+				pageNumber = int64(tv)
+			case int64:
+				pageNumber = tv
+			case float64:
+				pageNumber = int64(tv)
+			}
+		}
+		chunkIndex := int64(0)
+		if v, ok := r.Metadata["chunk_index"]; ok {
+			switch tv := v.(type) {
+			case int:
+				chunkIndex = int64(tv)
+			case int64:
+				chunkIndex = tv
+			case float64:
+				chunkIndex = int64(tv)
+			}
+		}
+		sources = append(sources, NotebookChatSource{
+			DocumentID:   r.DocumentID,
+			DocumentName: docName,
+			PageNumber:   pageNumber,
+			ChunkIndex:   chunkIndex,
+			Content:      r.Content,
+			Score:        r.Score,
+			ChunkType:    metadataStringAny(r.Metadata, "chunk_type"),
+			SectionPath:  metadataStringSlice(r.Metadata, "section_path"),
+			BoundingBox:  metadataFloat32Slice(r.Metadata, "bbox"),
+			VisualPath:   firstNonEmpty(metadataStringAny(r.Metadata, "visual_path"), extractVisualPathMarker(r.Content)),
+			VisualType:   firstNonEmpty(metadataStringAny(r.Metadata, "visual_type"), extractVisualTypeMarker(r.Content)),
+		})
+	}
+	return sources
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func extractVisualPathMarker(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), "visualpath:") {
+			return strings.TrimSpace(line[len("VisualPath:"):])
+		}
+	}
+	return ""
+}
+
+func extractVisualTypeMarker(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "[visual:") && strings.HasSuffix(line, "]") {
+			return strings.TrimSpace(line[len("[Visual:") : len(line)-1])
+		}
+	}
+	return ""
+}
+
+func isVisualQuestion(question string) bool {
+	q := strings.ToLower(question)
+	return hasAny(q, "chart", "graph", "figure", "image", "diagram", "shown", "visual", "plot", "trend", "图", "图表", "图片", "曲线", "趋势", "柱状", "饼图", "组织结构")
+}
+
+func selectVisualSource(sources []NotebookChatSource, minScore float32) (NotebookChatSource, string, bool) {
+	for _, source := range sources {
+		path, visualType := source.VisualEvidence()
+		if path == "" {
+			continue
+		}
+		if minScore > 0 && source.Score > 0 && source.Score < minScore {
+			continue
+		}
+		if visualType == "" && source.ChunkType != "image" && source.ChunkType != "caption" {
+			continue
+		}
+		return source, path, true
+	}
+	return NotebookChatSource{}, "", false
+}
+
+func buildVisualAnswerPrompt(question string, sources []NotebookChatSource, visualSource NotebookChatSource) string {
+	pack := BuildEvidencePackFromNotebookSources(sources)
+	var builder strings.Builder
+	builder.WriteString("Answer this document question using the attached cropped visual region and the evidence text below.\n")
+	builder.WriteString("Use only visible information from the image and evidence. If the visual evidence is insufficient, say exactly: The provided documents do not contain sufficient information to answer this question.\n")
+	builder.WriteString("Every factual paragraph must end with evidence IDs such as [E1]. Do not output raw [Source: ...] citations.\n\n")
+	builder.WriteString("Question:\n")
+	builder.WriteString(question)
+	builder.WriteString("\n\nSelected visual evidence:\n")
+	builder.WriteString(fmt.Sprintf("Document: %s, Page %d, Type: %s\n", visualSource.DocumentName, visualSource.PageNumber+1, firstNonEmpty(visualSource.VisualType, visualSource.ChunkType)))
+	builder.WriteString(visualSource.Content)
+	builder.WriteString("\n\nEvidence blocks:\n")
+	builder.WriteString(pack.FormatForPrompt())
+	builder.WriteString("\n\nAnswer:\n")
+	return builder.String()
+}
+
+func mimeTypeFromPath(path string) string {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".png"):
+		return "image/png"
+	case strings.HasSuffix(lower, ".webp"):
+		return "image/webp"
+	default:
+		return "image/jpeg"
+	}
+}
+
+func metadataStringAny(metadata map[string]interface{}, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	if v, ok := metadata[key]; ok && v != nil {
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+	return ""
+}
+
+func metadataStringSlice(metadata map[string]interface{}, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	switch v := metadata[key].(type) {
+	case []string:
+		return v
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		return parseStringArray(v)
+	default:
+		return nil
+	}
+}
+
+func metadataFloat32Slice(metadata map[string]interface{}, key string) []float32 {
+	if metadata == nil {
+		return nil
+	}
+	switch v := metadata[key].(type) {
+	case []float32:
+		return v
+	case []float64:
+		out := make([]float32, 0, len(v))
+		for _, n := range v {
+			out = append(out, float32(n))
+		}
+		return out
+	case []interface{}:
+		out := make([]float32, 0, len(v))
+		for _, item := range v {
+			switch n := item.(type) {
+			case float32:
+				out = append(out, n)
+			case float64:
+				out = append(out, float32(n))
+			case int:
+				out = append(out, float32(n))
+			}
+		}
+		return out
+	case string:
+		return parseFloat32Array(v)
+	default:
+		return nil
+	}
+}
+
+func parseStringArray(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err == nil {
+		return values
+	}
+	return []string{raw}
+}
+
+func parseFloat32Array(raw string) []float32 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var values []float32
+	if err := json.Unmarshal([]byte(raw), &values); err == nil {
+		return values
+	}
+	var values64 []float64
+	if err := json.Unmarshal([]byte(raw), &values64); err == nil {
+		out := make([]float32, 0, len(values64))
+		for _, n := range values64 {
+			out = append(out, float32(n))
+		}
+		return out
+	}
+	return nil
 }

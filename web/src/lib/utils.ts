@@ -13,6 +13,17 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export function downloadBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 // ============================================================
 // API 基础配置
 // ============================================================
@@ -42,12 +53,27 @@ export const API_ENDPOINTS = {
   sessionMessages: (sessionId: string) => `/chat/sessions/${sessionId}/messages`,
   chat: (notebookId: string, sessionId: string) =>
     `/notebooks/${notebookId}/sessions/${sessionId}/chat`,
+  sessionMemory: (notebookId: string, sessionId: string) =>
+    `/notebooks/${notebookId}/sessions/${sessionId}/memory`,
+  sessionMemoryRefresh: (notebookId: string, sessionId: string) =>
+    `/notebooks/${notebookId}/sessions/${sessionId}/memory/refresh`,
 
   // 模型
   models: '/chat/models',
 
   // 搜索
   search: (notebookId: string) => `/notebooks/${notebookId}/search`,
+
+  // 导出
+  exportOutline: (notebookId: string) => `/notebooks/${notebookId}/exports/outline`,
+  artifacts: (notebookId: string) => `/notebooks/${notebookId}/artifacts`,
+  artifactGenerate: (notebookId: string) => `/notebooks/${notebookId}/artifacts/generate`,
+  exportConfirm: (notebookId: string, artifactId: string) =>
+    `/notebooks/${notebookId}/exports/${artifactId}/confirm`,
+  artifact: (notebookId: string, artifactId: string) =>
+    `/notebooks/${notebookId}/artifacts/${artifactId}`,
+  exportDownload: (notebookId: string, artifactId: string) =>
+    `/notebooks/${notebookId}/exports/${artifactId}/download`,
 
   // 笔记
   notes: '/notes',
@@ -62,7 +88,7 @@ export const API_ENDPOINTS = {
 // ============================================================
 
 export interface FetchOptions extends RequestInit {
-  token?: string;
+  token?: string | null;
 }
 
 // ============================================================
@@ -122,6 +148,11 @@ export interface SSEChunk {
     chunk_index: number;
     content: string;
     score: number;
+    chunk_type?: string;
+    section_path?: string[];
+    bounding_box?: [number, number, number, number];
+    visual_path?: string;
+    visual_type?: string;
   }>;
 }
 

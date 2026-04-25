@@ -42,6 +42,7 @@ web/
 │   │   │   ├── ChatPanel.tsx     # 聊天面板（主容器）
 │   │   │   ├── ChatMessage.tsx   # 单条消息渲染
 │   │   │   └── SourceBadge.tsx   # 来源引用标签
+│   │   ├── export/               # Notebook 导出组件（弹窗、大纲编辑、任务托盘）
 │   │   ├── guide/                # 文档指南组件
 │   │   ├── layout/               # 布局组件（侧边栏、顶栏）
 │   │   ├── pdf/                  # PDF 预览与高亮组件
@@ -55,7 +56,8 @@ web/
 │   │       ├── checkbox.tsx      # 复选框
 │   │       ├── dropdown-menu.tsx # 下拉菜单
 │   │       ├── scroll-area.tsx   # 滚动区域
-│   │       └── skeleton.tsx      # 骨架屏
+│   │       ├── skeleton.tsx      # 骨架屏
+│   │       └── tooltip.tsx       # 提示框
 │   ├── hooks/                    # 自定义 Hooks
 │   │   ├── useChat.ts            # 聊天 SSE 流式通信 Hook
 │   │   ├── useNotebook.ts        # 笔记本 CRUD 操作 Hook
@@ -72,7 +74,7 @@ web/
 ├── next.config.mjs               # Next.js 配置
 ├── tailwind.config.ts            # Tailwind CSS 配置
 ├── tsconfig.json                 # TypeScript 配置
-├── postcss.config.js             # PostCSS 配置
+├── postcss.config.mjs             # PostCSS 配置
 └── package.json                  # 项目依赖
 ```
 
@@ -104,6 +106,7 @@ interface NotebookState {
   mainView: 'guide' | 'pdf';        // 主视图模式
   activePdfId: string | null;        // 当前预览的 PDF ID
   highlightTarget: HighlightTarget | null;  // 高亮目标（来源定位）
+  selectedModel: string | null;       // LLM 模型选择 (null = 使用默认模型)
 }
 ```
 
@@ -115,6 +118,7 @@ interface NotebookState {
 
 - **SWR**：用于常规 CRUD 操作（笔记本、笔记等），自带缓存和自动重新验证
 - **SSE (Server-Sent Events)**：用于聊天流式响应，通过自定义 `useChat` Hook 封装
+- **Artifact Export UI**：笔记本页面包含 Export 菜单，支持 Markdown、思维导图、Word、PPT 和 PDF。导出流程为配置要求 → 生成可编辑大纲 → 异步渲染 → 轮询任务状态 → 下载文件。
 - **API 客户端**：统一封装在 `lib/utils.ts` 中，包含：
   - `apiFetch()`：通用请求函数（带 JWT 认证）
   - `streamChat()`：SSE 流式聊天
@@ -181,8 +185,12 @@ AI 回复中的 Source Badge 点击
 - 标签分类管理
 - 钉住重要笔记
 
-### 6. 视觉问答 (VQA)
+### 6. 视觉问答 (VQA) — 后端已支持，前端待集成
+
+> 后端 VQA 接口已就绪 (`/api/v1/vqa/image`, `/vqa/image-url`, `/vqa/image-context`)，前端 UI 和 Hook 尚未实现。如需使用，可通过 API 直接调用。
+
 - 图片上传问答
+- 图片 URL 问答
 - 结合文档上下文的图文增强问答
 
 ---

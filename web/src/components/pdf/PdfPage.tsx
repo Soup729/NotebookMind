@@ -12,7 +12,8 @@ import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import { HighlightLayer } from './HighlightLayer';
 import type { HighlightTarget } from '@/types/api';
-import type { PDFPageProxy } from 'pdfjs-dist';
+
+type LoadedPdfPage = Parameters<NonNullable<React.ComponentProps<typeof Page>['onLoadSuccess']>>[0];
 
 // 配置 PDF.js worker
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -24,7 +25,7 @@ interface PdfPageProps {
   scale: number;
   highlights: HighlightTarget[];
   activeHighlightId?: string | null;
-  onLoadSuccess?: (page: PDFPageProxy) => void;
+  onLoadSuccess?: (page: LoadedPdfPage) => void;
   onHighlightClick?: (highlight: HighlightTarget) => void;
   className?: string;
 }
@@ -63,7 +64,7 @@ export const PdfPage = memo(function PdfPage({
     return () => window.removeEventListener('resize', updateDimensions);
   }, []);
 
-  const handleLoadSuccess = (page: PDFPageProxy) => {
+  const handleLoadSuccess = (page: LoadedPdfPage) => {
     setLoading(false);
     setError(null);
 

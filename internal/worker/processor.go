@@ -25,20 +25,36 @@ type DocumentProcessor struct {
 	llmService      service.LLMService
 	documents       repository.DocumentRepository
 	notebookService service.NotebookService
+	exportService   service.NotebookExportService
 	parser          parser.ParserService
+	bm25Index       *service.BM25Index
 }
 
-func NewDocumentProcessor(llmService service.LLMService, documents repository.DocumentRepository, notebookService service.NotebookService, parserSvc parser.ParserService) *DocumentProcessor {
+func NewDocumentProcessor(llmService service.LLMService, documents repository.DocumentRepository, notebookService service.NotebookService, exportService service.NotebookExportService, parserSvc parser.ParserService, bm25Index *service.BM25Index) *DocumentProcessor {
 	return &DocumentProcessor{
 		llmService:      llmService,
 		documents:       documents,
 		notebookService: notebookService,
+		exportService:   exportService,
 		parser:          parserSvc,
+		bm25Index:       bm25Index,
 	}
 }
 
 func (p *DocumentProcessor) RegisterHandlers(mux *asynq.ServeMux) {
 	mux.HandleFunc(tasks.TypeProcessDocument, p.ProcessDocumentTask)
+	mux.HandleFunc(tasks.TypeRenderNotebookExport, p.RenderNotebookExportTask)
+}
+
+func (p *DocumentProcessor) RenderNotebookExportTask(ctx context.Context, task *asynq.Task) error {
+	var payload tasks.RenderNotebookExportPayload
+	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+		return fmt.Errorf("unmarshal render notebook export payload: %w", err)
+	}
+	if p.exportService == nil {
+		return errors.New("export service is not configured")
+	}
+	return p.exportService.RenderExport(ctx, payload.ArtifactID)
 }
 
 // ProcessDocumentTask 使用新的结构化解析链路处理文档
@@ -94,6 +110,10 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 		_ = p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusFailed, 0, err.Error())
 		return fmt.Errorf("delete old chunks: %w", err)
 	}
+	// 同步清理BM25索引中该文档的旧chunks
+	if p.bm25Index != nil {
+		p.bm25Index.RemoveByDocument(payload.DocumentID)
+	}
 
 	// 合并 parent + child chunks 并转为 schema.Document
 	allChunks := append(parentChunks, childChunks...)
@@ -104,7 +124,7 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 		if content == "" {
 			continue
 		}
-		
+
 		docs = append(docs, schema.Document{
 			PageContent: content,
 			Metadata:    chunk.ToMetadata(),
@@ -132,6 +152,26 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 		_ = p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusFailed, 0, err.Error())
 		return fmt.Errorf("index documents into vector store: %w", err)
 	}
+
+	// 同步写入BM25索引
+	if p.bm25Index != nil {
+		for idx := range allChunks {
+			chunk := allChunks[idx]
+			content := strings.TrimSpace(chunk.Content)
+			if content == "" {
+				continue
+			}
+			chunkID := chunk.ID
+			if chunkID == "" {
+				chunkID = uuid.NewString()
+			}
+			p.bm25Index.IndexDocument(chunkID, payload.DocumentID, content)
+		}
+		zap.L().Debug("indexed chunks into BM25",
+			zap.String("document_id", payload.DocumentID),
+			zap.Int("chunk_count", len(allChunks)),
+		)
+	}
 	metrics.IndexLatencyMs = indexTimer.ElapsedMs()
 
 	if err := p.documents.UpdateProcessingResult(ctx, payload.DocumentID, models.DocumentStatusCompleted, len(docs), ""); err != nil {
@@ -143,7 +183,7 @@ func (p *DocumentProcessor) ProcessDocumentTask(ctx context.Context, task *asynq
 	observability.LogDocumentProcessing(metrics)
 
 	// ========== 阶段3: 异步生成 Document Guide ==========
-	p.triggerGuideGeneration(ctx, payload, parseResult.RawText)
+	p.triggerNotebookIndexing(ctx, payload, parseResult.RawText, allChunks)
 
 	zap.L().Info("document task processed with structured parsing",
 		zap.String("task_id", payload.TaskID),
@@ -226,7 +266,7 @@ func (p *DocumentProcessor) fallbackParse(filePath string) (*parser.ParseResult,
 }
 
 // triggerGuideGeneration 异步触发 Guide（摘要/FAQ/关键点）生成
-func (p *DocumentProcessor) triggerGuideGeneration(ctx context.Context, payload tasks.ProcessDocumentPayload, rawText string) {
+func (p *DocumentProcessor) triggerNotebookIndexing(ctx context.Context, payload tasks.ProcessDocumentPayload, rawText string, chunks []*parser.Chunk) {
 	doc, docErr := p.documents.GetByIDForWorker(ctx, payload.DocumentID)
 	if docErr != nil {
 		zap.L().Warn("failed to get document for guide generation",
@@ -240,9 +280,13 @@ func (p *DocumentProcessor) triggerGuideGeneration(ctx context.Context, payload 
 
 	go func() {
 		guideCtx := context.Background()
-		if err := p.notebookService.ProcessDocumentWithGuide(
-			guideCtx, payload.UserID, doc.NotebookID, payload.DocumentID, rawText,
-		); err != nil {
+		var err error
+		if len(chunks) > 0 {
+			err = p.notebookService.IndexParsedChunks(guideCtx, payload.UserID, doc.NotebookID, payload.DocumentID, chunks)
+		} else {
+			err = p.notebookService.ProcessDocumentWithGuide(guideCtx, payload.UserID, doc.NotebookID, payload.DocumentID, rawText)
+		}
+		if err != nil {
 			zap.L().Error("failed to generate document guide",
 				zap.String("document_id", payload.DocumentID),
 				zap.String("notebook_id", doc.NotebookID),

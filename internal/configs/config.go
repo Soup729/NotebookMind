@@ -114,12 +114,12 @@ type AzureOpenAIConfig struct {
 // CustomModelConfig defines a user-customized OpenAI-compatible model
 // Users can add any LLM provider that exposes an OpenAI-compatible API
 type CustomModelConfig struct {
-	ID          string `mapstructure:"id"`           // 唯一标识，如 "deepseek", "qwen", "moonshot"
-	Name        string `mapstructure:"name"`          // 显示名称，如 "DeepSeek V3"
+	ID          string `mapstructure:"id"`   // 唯一标识，如 "deepseek", "qwen", "moonshot"
+	Name        string `mapstructure:"name"` // 显示名称，如 "DeepSeek V3"
 	APIKey      string `mapstructure:"api_key"`
-	BaseURL     string `mapstructure:"base_url"`       // OpenAI 兼容的 base URL
-	ChatModel   string `mapstructure:"chat_model"`    // 模型名称，如 "deepseek-chat"
-	Description string `mapstructure:"description"`  // 可选描述
+	BaseURL     string `mapstructure:"base_url"`    // OpenAI 兼容的 base URL
+	ChatModel   string `mapstructure:"chat_model"`  // 模型名称，如 "deepseek-chat"
+	Description string `mapstructure:"description"` // 可选描述
 }
 
 // LLMProviderConfig is a union type for different LLM providers
@@ -133,16 +133,16 @@ type LLMProviderConfig struct {
 
 // LLMConfig wraps all LLM related configs
 type LLMConfig struct {
-	DefaultProvider string             `mapstructure:"default_provider"`
+	DefaultProvider string            `mapstructure:"default_provider"`
 	Providers       LLMProviderConfig `mapstructure:"providers"`
 }
 
 // ModelInfo represents an available model for frontend selection
 type ModelInfo struct {
-	ID          string `json:"id"`           // "openai:gpt-4o-mini", "custom:deepseek"
-	Provider    string `json:"provider"`     // "openai", "anthropic", "gemini", "custom", "deepseek", etc.
-	Name        string `json:"name"`         // 显示名称
-	ModelName   string `json:"model_name"`   // 实际模型标识（传给 API 的）
+	ID          string `json:"id"`         // "openai:gpt-4o-mini", "custom:deepseek"
+	Provider    string `json:"provider"`   // "openai", "anthropic", "gemini", "custom", "deepseek", etc.
+	Name        string `json:"name"`       // 显示名称
+	ModelName   string `json:"model_name"` // 实际模型标识（传给 API 的）
 	BaseURL     string `json:"base_url,omitempty"`
 	Description string `json:"description,omitempty"`
 	IsDefault   bool   `json:"is_default"`
@@ -243,19 +243,19 @@ type ChatConfig struct {
 
 // ParserConfig defines document parser configuration
 type ParserConfig struct {
-	ChunkSize        int     `mapstructure:"chunk_size"`         // Parent chunk max chars, default 1000
-	ChunkOverlap     int     `mapstructure:"chunk_overlap"`      // Parent chunk overlap, default 200
-	ChildChunkSize   int     `mapstructure:"child_chunk_size"`   // Child chunk (for recall) max chars, default 300
-	ExtractTables    bool    `mapstructure:"extract_tables"`     // Extract tables, default true
-	TableMaxRows     int     `mapstructure:"table_max_rows"`     // Max rows per table, default 100
-	TableMaxCols     int     `mapstructure:"table_max_cols"`     // Max cols per table, default 20
-	ExtractImages    bool    `mapstructure:"extract_images"`     // Extract images, default true
-	ImageMinSize     int     `mapstructure:"image_min_size"`    // Min image size in px, default 50
-	VLMEnabled       bool    `mapstructure:"vlm_enabled"`        // Enable VLM for image description, default false
-	VLMBatchSize     int     `mapstructure:"vlm_batch_size"`     // VLM batch size, default 5
-	OCRThreshold     float32 `mapstructure:"ocr_threshold"`      // Text density threshold for OCR trigger, default 0.1
-	OCREnabled       bool    `mapstructure:"ocr_enabled"`        // Enable OCR capability, default true
-	DetectHeadings   bool    `mapstructure:"detect_headings"`    // Detect heading hierarchy, default true
+	ChunkSize      int     `mapstructure:"chunk_size"`       // Parent chunk max chars, default 1000
+	ChunkOverlap   int     `mapstructure:"chunk_overlap"`    // Parent chunk overlap, default 200
+	ChildChunkSize int     `mapstructure:"child_chunk_size"` // Child chunk (for recall) max chars, default 300
+	ExtractTables  bool    `mapstructure:"extract_tables"`   // Extract tables, default true
+	TableMaxRows   int     `mapstructure:"table_max_rows"`   // Max rows per table, default 100
+	TableMaxCols   int     `mapstructure:"table_max_cols"`   // Max cols per table, default 20
+	ExtractImages  bool    `mapstructure:"extract_images"`   // Extract images, default true
+	ImageMinSize   int     `mapstructure:"image_min_size"`   // Min image size in px, default 50
+	VLMEnabled     bool    `mapstructure:"vlm_enabled"`      // Enable VLM for image description, default false
+	VLMBatchSize   int     `mapstructure:"vlm_batch_size"`   // VLM batch size, default 5
+	OCRThreshold   float32 `mapstructure:"ocr_threshold"`    // Text density threshold for OCR trigger, default 0.1
+	OCREnabled     bool    `mapstructure:"ocr_enabled"`      // Enable OCR capability, default true
+	DetectHeadings bool    `mapstructure:"detect_headings"`  // Detect heading hierarchy, default true
 }
 
 // OCRConfig defines OCR service configuration
@@ -266,27 +266,90 @@ type OCRConfig struct {
 
 // VLMConfig defines Vision-Language Model configuration
 type VLMConfig struct {
-	Enabled bool   `mapstructure:"enabled"`  // Enable VLM image description
+	Enabled bool   `mapstructure:"enabled"` // Enable VLM image description
 	APIKey  string `mapstructure:"api_key"`
 	BaseURL string `mapstructure:"base_url"`
-	Model   string `mapstructure:"model"`   // e.g. "gpt-4o-mini"
+	Model   string `mapstructure:"model"` // e.g. "gpt-4o-mini"
+}
+
+// MultimodalConfig defines lightweight document-level visual RAG settings.
+type MultimodalConfig struct {
+	Enabled                 bool    `mapstructure:"enabled"`
+	SaveVisualRegions       bool    `mapstructure:"save_visual_regions"`
+	VisualStorageRoot       string  `mapstructure:"visual_storage_root"`
+	ChartExtractionEnabled  bool    `mapstructure:"chart_extraction_enabled"`
+	VisualRerankEnabled     bool    `mapstructure:"visual_rerank_enabled"`
+	VisualGenerationEnabled bool    `mapstructure:"visual_generation_enabled"`
+	MaxVisualEvidence       int     `mapstructure:"max_visual_evidence"`
+	MinVisualScore          float32 `mapstructure:"min_visual_score"`
+}
+
+// HybridSearchConfig defines hybrid search configuration (Phase 2)
+type HybridSearchConfig struct {
+	Enabled       bool    `mapstructure:"enabled"`
+	RRFK          int     `mapstructure:"rrf_k"`          // RRF 常数（默认 60）
+	TopK          int     `mapstructure:"top_k"`          // 初始召回数量（默认 20）
+	RerankTopK    int     `mapstructure:"rerank_top_k"`   // Rerank 后返回数量（默认 5）
+	MinConfidence float32 `mapstructure:"min_confidence"` // Failover 阈值（默认 0.3）
+	MaxRetries    int     `mapstructure:"max_retries"`    // 最大重试次数（默认 1）
+}
+
+// RerankerConfig defines reranker configuration (Phase 2)
+type RerankerConfig struct {
+	Provider string `mapstructure:"provider"` // "cohere" | "fallback"
+	Model    string `mapstructure:"model"`    // 默认 "rerank-v3.5"
+	BaseURL  string `mapstructure:"base_url"` // 默认 Cohere API URL
+	Timeout  int    `mapstructure:"timeout"`  // 秒，默认 5
+}
+
+// IntentRewriteConfig defines intent rewrite configuration (Phase 2)
+type IntentRewriteConfig struct {
+	Enabled           bool `mapstructure:"enabled"`             // 由 ENABLE_INTENT_ROUTING 控制
+	LLMRewriteEnabled bool `mapstructure:"llm_rewrite_enabled"` // 由 ENABLE_QUERY_REWRITE 控制
+	MaxContextTerms   int  `mapstructure:"max_context_terms"`   // 默认 3
+}
+
+// TrustWorkflowConfig defines trustworthy generation workflow configuration (Phase 3)
+type TrustWorkflowConfig struct {
+	Enabled           bool `mapstructure:"enabled"`
+	HighRiskOnly      bool `mapstructure:"high_risk_only"`
+	MaxRepairAttempts int  `mapstructure:"max_repair_attempts"`
+}
+
+// CitationGuardConfig defines lightweight citation binding and validation settings.
+type CitationGuardConfig struct {
+	Enabled                   bool    `mapstructure:"enabled"`
+	HighRiskOnly              bool    `mapstructure:"high_risk_only"`
+	RepairEnabled             bool    `mapstructure:"repair_enabled"`
+	MaxRepairAttempts         int     `mapstructure:"max_repair_attempts"`
+	RequireParagraphCitations bool    `mapstructure:"require_paragraph_citations"`
+	ValidateNumbers           bool    `mapstructure:"validate_numbers"`
+	ValidateEntityPhrases     bool    `mapstructure:"validate_entity_phrases"`
+	MinCitationCoverage       float64 `mapstructure:"min_citation_coverage"`
+	FailClosedForHighRisk     bool    `mapstructure:"fail_closed_for_high_risk"`
 }
 
 // Config represents the global configuration
 type Config struct {
-	App      AppConfig      `mapstructure:"app"`
-	Log      LogConfig      `mapstructure:"log"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Cache    CacheConfig    `mapstructure:"cache"`
-	Milvus   MilvusConfig   `mapstructure:"milvus"`
-	LLM      LLMConfig      `mapstructure:"llm"`
-	Auth     AuthConfig     `mapstructure:"auth"`
-	Upload   UploadConfig   `mapstructure:"upload"`
-	Asynq    AsynqConfig    `mapstructure:"asynq"`
-	Chat     ChatConfig     `mapstructure:"chat"`
-	Parser   ParserConfig   `mapstructure:"parser"`
-	OCR      OCRConfig      `mapstructure:"ocr"`
-	VLM      VLMConfig      `mapstructure:"vlm"`
+	App           AppConfig           `mapstructure:"app"`
+	Log           LogConfig           `mapstructure:"log"`
+	Database      DatabaseConfig      `mapstructure:"database"`
+	Cache         CacheConfig         `mapstructure:"cache"`
+	Milvus        MilvusConfig        `mapstructure:"milvus"`
+	LLM           LLMConfig           `mapstructure:"llm"`
+	Auth          AuthConfig          `mapstructure:"auth"`
+	Upload        UploadConfig        `mapstructure:"upload"`
+	Asynq         AsynqConfig         `mapstructure:"asynq"`
+	Chat          ChatConfig          `mapstructure:"chat"`
+	Parser        ParserConfig        `mapstructure:"parser"`
+	OCR           OCRConfig           `mapstructure:"ocr"`
+	VLM           VLMConfig           `mapstructure:"vlm"`
+	Multimodal    MultimodalConfig    `mapstructure:"multimodal"`
+	HybridSearch  HybridSearchConfig  `mapstructure:"hybrid_search"`
+	Reranker      RerankerConfig      `mapstructure:"reranker"`
+	IntentRewrite IntentRewriteConfig `mapstructure:"intent_rewrite"`
+	TrustWorkflow TrustWorkflowConfig `mapstructure:"trust_workflow"`
+	CitationGuard CitationGuardConfig `mapstructure:"citation_guard"`
 }
 
 // Global config instance
@@ -332,6 +395,11 @@ func overrideFromEnv(cfg *Config) {
 	cfg.Milvus.Username = envString("MILVUS_USERNAME", cfg.Milvus.Username)
 	cfg.Milvus.Password = envString("MILVUS_PASSWORD", cfg.Milvus.Password)
 	cfg.Milvus.CollectionName = envString("MILVUS_COLLECTION_NAME", cfg.Milvus.CollectionName)
+	if d := os.Getenv("MILVUS_DIMENSION"); d != "" {
+		if v, err := strconv.Atoi(d); err == nil && v > 0 {
+			cfg.Milvus.Dimension = v
+		}
+	}
 
 	// LLM - Default provider
 	cfg.LLM.DefaultProvider = envString("LLM_DEFAULT_PROVIDER", cfg.LLM.DefaultProvider)
@@ -374,19 +442,143 @@ func overrideFromEnv(cfg *Config) {
 	cfg.Parser.ChunkSize = envInt("PARSER_CHUNK_SIZE", cfg.Parser.ChunkSize)
 	cfg.Parser.ChunkOverlap = envInt("PARSER_CHUNK_OVERLAP", cfg.Parser.ChunkOverlap)
 	cfg.Parser.ChildChunkSize = envInt("PARSER_CHILD_CHUNK_SIZE", cfg.Parser.ChildChunkSize)
-	if cfg.Parser.ChunkSize == 0 { cfg.Parser.ChunkSize = 1000 }
-	if cfg.Parser.ChunkOverlap == 0 { cfg.Parser.ChunkOverlap = 200 }
-	if cfg.Parser.ChildChunkSize == 0 { cfg.Parser.ChildChunkSize = 300 }
-	
+	if cfg.Parser.ChunkSize == 0 {
+		cfg.Parser.ChunkSize = 1000
+	}
+	if cfg.Parser.ChunkOverlap == 0 {
+		cfg.Parser.ChunkOverlap = 200
+	}
+	if cfg.Parser.ChildChunkSize == 0 {
+		cfg.Parser.ChildChunkSize = 300
+	}
+
 	// OCR
 	cfg.OCR.BaseURL = envString("OCR_BASE_URL", cfg.OCR.BaseURL)
 	cfg.OCR.Provider = envString("OCR_PROVIDER", cfg.OCR.Provider)
-	if cfg.OCR.Provider == "" { cfg.OCR.Provider = "fallback" }
+	if cfg.OCR.Provider == "" {
+		cfg.OCR.Provider = "fallback"
+	}
 
 	// VLM
 	cfg.VLM.APIKey = envString("VLM_API_KEY", cfg.VLM.APIKey)
 	cfg.VLM.BaseURL = envString("VLM_BASE_URL", cfg.VLM.BaseURL)
 	cfg.VLM.Model = envString("VLM_MODEL", cfg.VLM.Model)
+
+	// Phase 4: lightweight document-level multimodal RAG
+	cfg.Multimodal.Enabled = envBool("MULTIMODAL_ENABLED", cfg.Multimodal.Enabled)
+	if !cfg.Multimodal.Enabled && os.Getenv("MULTIMODAL_ENABLED") == "" {
+		cfg.Multimodal.Enabled = true
+	}
+	cfg.Multimodal.SaveVisualRegions = envBool("MULTIMODAL_SAVE_VISUAL_REGIONS", cfg.Multimodal.SaveVisualRegions)
+	if !cfg.Multimodal.SaveVisualRegions && os.Getenv("MULTIMODAL_SAVE_VISUAL_REGIONS") == "" {
+		cfg.Multimodal.SaveVisualRegions = true
+	}
+	if cfg.Multimodal.VisualStorageRoot == "" {
+		cfg.Multimodal.VisualStorageRoot = "storage/visual"
+	}
+	cfg.Multimodal.VisualStorageRoot = envString("MULTIMODAL_VISUAL_STORAGE_ROOT", cfg.Multimodal.VisualStorageRoot)
+	cfg.Multimodal.ChartExtractionEnabled = envBool("MULTIMODAL_CHART_EXTRACTION_ENABLED", cfg.Multimodal.ChartExtractionEnabled)
+	if !cfg.Multimodal.ChartExtractionEnabled && os.Getenv("MULTIMODAL_CHART_EXTRACTION_ENABLED") == "" {
+		cfg.Multimodal.ChartExtractionEnabled = true
+	}
+	cfg.Multimodal.VisualRerankEnabled = envBool("MULTIMODAL_VISUAL_RERANK_ENABLED", cfg.Multimodal.VisualRerankEnabled)
+	if !cfg.Multimodal.VisualRerankEnabled && os.Getenv("MULTIMODAL_VISUAL_RERANK_ENABLED") == "" {
+		cfg.Multimodal.VisualRerankEnabled = true
+	}
+	cfg.Multimodal.VisualGenerationEnabled = envBool("MULTIMODAL_VISUAL_GENERATION_ENABLED", cfg.Multimodal.VisualGenerationEnabled)
+	if cfg.Multimodal.MaxVisualEvidence == 0 {
+		cfg.Multimodal.MaxVisualEvidence = 2
+	}
+	cfg.Multimodal.MaxVisualEvidence = envInt("MULTIMODAL_MAX_VISUAL_EVIDENCE", cfg.Multimodal.MaxVisualEvidence)
+	if cfg.Multimodal.MinVisualScore == 0 {
+		cfg.Multimodal.MinVisualScore = 0.35
+	}
+	cfg.Multimodal.MinVisualScore = float32(envFloat64("MULTIMODAL_MIN_VISUAL_SCORE", float64(cfg.Multimodal.MinVisualScore)))
+
+	// Phase 2: Hybrid Search
+	cfg.HybridSearch.Enabled = envBool("HYBRID_SEARCH_ENABLED", cfg.HybridSearch.Enabled)
+	if cfg.HybridSearch.RRFK == 0 {
+		cfg.HybridSearch.RRFK = 60
+	}
+	if cfg.HybridSearch.TopK == 0 {
+		cfg.HybridSearch.TopK = 20
+	}
+	if cfg.HybridSearch.RerankTopK == 0 {
+		cfg.HybridSearch.RerankTopK = 5
+	}
+	if cfg.HybridSearch.MinConfidence == 0 {
+		cfg.HybridSearch.MinConfidence = 0.3
+	}
+	if cfg.HybridSearch.MaxRetries == 0 {
+		cfg.HybridSearch.MaxRetries = 1
+	}
+	cfg.HybridSearch.TopK = envInt("HYBRID_SEARCH_TOP_K", cfg.HybridSearch.TopK)
+	cfg.HybridSearch.RerankTopK = envInt("HYBRID_SEARCH_RERANK_TOP_K", cfg.HybridSearch.RerankTopK)
+
+	// Phase 2: Reranker (API Key 从环境变量读取)
+	cfg.Reranker.Provider = envString("RERANKER_PROVIDER", cfg.Reranker.Provider)
+	cfg.Reranker.Model = envString("RERANKER_MODEL", cfg.Reranker.Model)
+	cfg.Reranker.BaseURL = envString("RERANKER_BASE_URL", cfg.Reranker.BaseURL)
+	cfg.Reranker.Timeout = envInt("RERANKER_TIMEOUT", cfg.Reranker.Timeout)
+	if cfg.Reranker.Provider == "" {
+		cfg.Reranker.Provider = "cohere"
+	}
+	if cfg.Reranker.Model == "" {
+		cfg.Reranker.Model = "rerank-v3.5"
+	}
+	if cfg.Reranker.BaseURL == "" {
+		cfg.Reranker.BaseURL = "https://api.cohere.com/v2"
+	}
+	if cfg.Reranker.Timeout == 0 {
+		cfg.Reranker.Timeout = 5
+	}
+
+	// Phase 2: Intent Rewrite (由 .env 开关控制)
+	cfg.IntentRewrite.Enabled = envBool("ENABLE_INTENT_ROUTING", cfg.IntentRewrite.Enabled)
+	cfg.IntentRewrite.LLMRewriteEnabled = envBool("ENABLE_QUERY_REWRITE", cfg.IntentRewrite.LLMRewriteEnabled)
+	if cfg.IntentRewrite.MaxContextTerms == 0 {
+		cfg.IntentRewrite.MaxContextTerms = 3
+	}
+	cfg.IntentRewrite.MaxContextTerms = envInt("INTENT_MAX_CONTEXT_TERMS", cfg.IntentRewrite.MaxContextTerms)
+
+	// Phase 3: Trustworthy Generation Workflow
+	cfg.TrustWorkflow.Enabled = envBool("ENABLE_TRUST_WORKFLOW", cfg.TrustWorkflow.Enabled)
+	cfg.TrustWorkflow.HighRiskOnly = envBool("TRUST_WORKFLOW_HIGH_RISK_ONLY", cfg.TrustWorkflow.HighRiskOnly)
+	if cfg.TrustWorkflow.MaxRepairAttempts == 0 {
+		cfg.TrustWorkflow.MaxRepairAttempts = 1
+	}
+	cfg.TrustWorkflow.MaxRepairAttempts = envInt("TRUST_WORKFLOW_MAX_REPAIR_ATTEMPTS", cfg.TrustWorkflow.MaxRepairAttempts)
+
+	// Lightweight citation guard for default notebook chat
+	cfg.CitationGuard.Enabled = envBool("ENABLE_CITATION_GUARD", cfg.CitationGuard.Enabled)
+	if !cfg.CitationGuard.Enabled && os.Getenv("ENABLE_CITATION_GUARD") == "" {
+		cfg.CitationGuard.Enabled = true
+	}
+	cfg.CitationGuard.HighRiskOnly = envBool("CITATION_GUARD_HIGH_RISK_ONLY", cfg.CitationGuard.HighRiskOnly)
+	cfg.CitationGuard.RepairEnabled = envBool("CITATION_GUARD_REPAIR_ENABLED", cfg.CitationGuard.RepairEnabled)
+	if !cfg.CitationGuard.RepairEnabled && os.Getenv("CITATION_GUARD_REPAIR_ENABLED") == "" {
+		cfg.CitationGuard.RepairEnabled = true
+	}
+	if cfg.CitationGuard.MaxRepairAttempts == 0 {
+		cfg.CitationGuard.MaxRepairAttempts = 1
+	}
+	cfg.CitationGuard.MaxRepairAttempts = envInt("CITATION_GUARD_MAX_REPAIR_ATTEMPTS", cfg.CitationGuard.MaxRepairAttempts)
+	if !cfg.CitationGuard.RequireParagraphCitations {
+		cfg.CitationGuard.RequireParagraphCitations = true
+	}
+	cfg.CitationGuard.RequireParagraphCitations = envBool("CITATION_GUARD_REQUIRE_PARAGRAPH_CITATIONS", cfg.CitationGuard.RequireParagraphCitations)
+	if !cfg.CitationGuard.ValidateNumbers {
+		cfg.CitationGuard.ValidateNumbers = true
+	}
+	cfg.CitationGuard.ValidateNumbers = envBool("CITATION_GUARD_VALIDATE_NUMBERS", cfg.CitationGuard.ValidateNumbers)
+	if cfg.CitationGuard.MinCitationCoverage == 0 {
+		cfg.CitationGuard.MinCitationCoverage = 0.8
+	}
+	cfg.CitationGuard.MinCitationCoverage = envFloat64("CITATION_GUARD_MIN_COVERAGE", cfg.CitationGuard.MinCitationCoverage)
+	if !cfg.CitationGuard.FailClosedForHighRisk {
+		cfg.CitationGuard.FailClosedForHighRisk = true
+	}
+	cfg.CitationGuard.FailClosedForHighRisk = envBool("CITATION_GUARD_FAIL_CLOSED_FOR_HIGH_RISK", cfg.CitationGuard.FailClosedForHighRisk)
 }
 
 func validateConfig(cfg *Config) error {
@@ -478,6 +670,38 @@ func envInt64(key string, current int64) int64 {
 		return current
 	}
 	parsed, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+	if err != nil {
+		return current
+	}
+	return parsed
+}
+
+func envBool(key string, current bool) bool {
+	val, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(val) == "" {
+		return current
+	}
+	return strings.ToLower(strings.TrimSpace(val)) == "true"
+}
+
+func envFloat32(key string, current float32) float32 {
+	val, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(val) == "" {
+		return current
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(val), 32)
+	if err != nil {
+		return current
+	}
+	return float32(parsed)
+}
+
+func envFloat64(key string, current float64) float64 {
+	val, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(val) == "" {
+		return current
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
 	if err != nil {
 		return current
 	}

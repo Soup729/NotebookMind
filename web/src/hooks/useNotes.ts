@@ -33,7 +33,7 @@ export function useNotes(params?: NoteListParams) {
 
   const { data, error, isLoading, mutate: boundMutate } = useSWR(
     token ? [buildUrl(), token] : null,
-    ([url, token]) => apiFetch<{ items: Note[]; total: number }>(url, { token }),
+    ([url, token]) => apiFetch<{ items: Note[]; total_count?: number; total?: number }>(url, { token }),
     {
       revalidateOnFocus: false,
       onError: (err) => {
@@ -44,7 +44,7 @@ export function useNotes(params?: NoteListParams) {
 
   return {
     notes: data?.items || [],
-    total: data?.total_count || 0,
+    total: data?.total_count ?? data?.total ?? 0,
     isLoading,
     error,
     mutate: boundMutate,

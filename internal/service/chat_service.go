@@ -25,11 +25,11 @@ type ChatSource struct {
 }
 
 type ChatReply struct {
-	Session                *models.ChatSession
-	Message                *models.ChatMessage
-	Sources                []ChatSource
-	RecommendedQuestions   []string        `json:"recommended_questions,omitempty"`
-	Reflection             *ReflectionResult `json:"reflection,omitempty"`
+	Session              *models.ChatSession
+	Message              *models.ChatMessage
+	Sources              []ChatSource
+	RecommendedQuestions []string          `json:"recommended_questions,omitempty"`
+	Reflection           *ReflectionResult `json:"reflection,omitempty"`
 }
 
 type ChatService interface {
@@ -47,14 +47,29 @@ type chatService struct {
 	chatRepo      repository.ChatRepository
 	historyLimit  int
 	retrievalTopK int
+	// Phase 2: Hybrid RAG
+	hybridSearch  HybridSearchService
+	intentRewrite IntentRewriteService
+	bm25Index     *BM25Index
 }
 
-func NewChatService(llmService LLMService, chatRepo repository.ChatRepository, historyLimit int, retrievalTopK int) ChatService {
+func NewChatService(
+	llmService LLMService,
+	chatRepo repository.ChatRepository,
+	historyLimit int,
+	retrievalTopK int,
+	hybridSearch HybridSearchService,
+	intentRewrite IntentRewriteService,
+	bm25Index *BM25Index,
+) ChatService {
 	return &chatService{
 		llmService:    llmService,
 		chatRepo:      chatRepo,
 		historyLimit:  historyLimit,
 		retrievalTopK: retrievalTopK,
+		hybridSearch:  hybridSearch,
+		intentRewrite: intentRewrite,
+		bm25Index:     bm25Index,
 	}
 }
 
@@ -120,20 +135,42 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, questi
 
 	// 检索阶段计时
 	retrievalTimer := observability.NewStopwatch()
-	retrievedDocs, err := s.llmService.RetrieveContext(ctx, question, s.retrievalTopK, RetrievalOptions{
-		UserID:      userID,
-		DocumentIDs: documentIDs,
-	})
-	metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
-	if err != nil {
-		metrics.ErrorType = "retrieval_failed"
-		metrics.ErrorMsg = err.Error()
-		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
-		observability.LogChatRequest(metrics)
-		return nil, fmt.Errorf("retrieve source documents: %w", err)
-	}
+	var sources []ChatSource
 
-	sources := documentsToSources(retrievedDocs)
+	if s.hybridSearch != nil {
+		// Phase 2: 混合检索路径
+		hybridResults, err := s.hybridSearch.SearchWithOptions(ctx, HybridSearchOptions{
+			Query:       question,
+			UserID:      userID,
+			SessionID:   sessionID,
+			DocumentIDs: documentIDs,
+			TopK:        s.retrievalTopK,
+		})
+		metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+		if err != nil {
+			metrics.ErrorType = "retrieval_failed"
+			metrics.ErrorMsg = err.Error()
+			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+			observability.LogChatRequest(metrics)
+			return nil, fmt.Errorf("hybrid search: %w", err)
+		}
+		sources = hybridResultsToChatSources(hybridResults)
+	} else {
+		// 降级：纯 Dense 检索
+		retrievedDocs, err := s.llmService.RetrieveContext(ctx, question, s.retrievalTopK, RetrievalOptions{
+			UserID:      userID,
+			DocumentIDs: documentIDs,
+		})
+		metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+		if err != nil {
+			metrics.ErrorType = "retrieval_failed"
+			metrics.ErrorMsg = err.Error()
+			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+			observability.LogChatRequest(metrics)
+			return nil, fmt.Errorf("retrieve source documents: %w", err)
+		}
+		sources = documentsToSources(retrievedDocs)
+	}
 	metrics.RetrievedChunks = len(sources)
 	metrics.TopK = s.retrievalTopK
 
@@ -212,6 +249,20 @@ func (s *chatService) SendMessage(ctx context.Context, userID, sessionID, questi
 }
 
 func (s *chatService) Search(ctx context.Context, userID, query string, topK int, documentIDs []string) ([]ChatSource, error) {
+	if s.hybridSearch != nil {
+		// Phase 2: 混合检索路径
+		hybridResults, err := s.hybridSearch.SearchWithOptions(ctx, HybridSearchOptions{
+			Query:       query,
+			UserID:      userID,
+			DocumentIDs: documentIDs,
+			TopK:        topK,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("hybrid search: %w", err)
+		}
+		return hybridResultsToChatSources(hybridResults), nil
+	}
+	// 降级：纯 Dense 检索
 	docs, err := s.llmService.RetrieveContext(ctx, query, topK, RetrievalOptions{
 		UserID:      userID,
 		DocumentIDs: documentIDs,
@@ -231,6 +282,31 @@ func documentsToSources(docs []schema.Document) []ChatSource {
 			Content:    doc.PageContent,
 			Score:      doc.Score,
 			ChunkIndex: metadataInt(doc.Metadata, "chunk_index"),
+		})
+	}
+	return sources
+}
+
+// hybridResultsToChatSources 将 HybridResult 转换为 ChatSource
+func hybridResultsToChatSources(results []HybridResult) []ChatSource {
+	sources := make([]ChatSource, 0, len(results))
+	for _, r := range results {
+		chunkIndex := 0
+		if v, ok := r.Metadata["chunk_index"]; ok {
+			switch tv := v.(type) {
+			case int:
+				chunkIndex = tv
+			case int64:
+				chunkIndex = int(tv)
+			case float64:
+				chunkIndex = int(tv)
+			}
+		}
+		sources = append(sources, ChatSource{
+			DocumentID: r.DocumentID,
+			Content:    r.Content,
+			Score:      r.Score,
+			ChunkIndex: chunkIndex,
 		})
 	}
 	return sources
@@ -301,8 +377,8 @@ func buildPrompt(history []models.ChatMessage, sources []ChatSource, question st
 
 func buildSessionTitle(question string) string {
 	title := strings.TrimSpace(question)
-	if len([]rune(title)) > 48 {
-		title = string([]rune(title)[:48]) + "..."
+	if len([]rune(title)) > 53 {
+		title = string([]rune(title)[:53]) + "..."
 	}
 	if title == "" {
 		return "New conversation"
@@ -357,23 +433,48 @@ func (s *chatService) StreamSendMessage(ctx context.Context, opts StreamChatOpti
 
 	// Step 3: Retrieve relevant chunks (with timing)
 	retrievalTimer := observability.NewStopwatch()
-	retrievedDocs, err := s.llmService.RetrieveContext(ctx, opts.Question, s.retrievalTopK, RetrievalOptions{
-		UserID:      opts.UserID,
-		DocumentIDs: opts.DocumentIDs,
-	})
-	metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
-	if err != nil {
-		metrics.ErrorType = "retrieval_failed"
-		metrics.ErrorMsg = err.Error()
-		metrics.TotalLatencyMs = totalTimer.ElapsedMs()
-		observability.LogChatRequest(metrics)
-		if opts.OnError != nil {
-			opts.OnError(fmt.Errorf("retrieve source documents: %w", err))
-		}
-		return fmt.Errorf("retrieve source documents: %w", err)
-	}
+	var sources []ChatSource
 
-	sources := documentsToSources(retrievedDocs)
+	if s.hybridSearch != nil {
+		// Phase 2: 混合检索路径
+		hybridResults, err := s.hybridSearch.SearchWithOptions(ctx, HybridSearchOptions{
+			Query:       opts.Question,
+			UserID:      opts.UserID,
+			SessionID:   opts.SessionID,
+			DocumentIDs: opts.DocumentIDs,
+			TopK:        s.retrievalTopK,
+		})
+		metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+		if err != nil {
+			metrics.ErrorType = "retrieval_failed"
+			metrics.ErrorMsg = err.Error()
+			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+			observability.LogChatRequest(metrics)
+			if opts.OnError != nil {
+				opts.OnError(fmt.Errorf("hybrid search: %w", err))
+			}
+			return fmt.Errorf("hybrid search: %w", err)
+		}
+		sources = hybridResultsToChatSources(hybridResults)
+	} else {
+		// 降级：纯 Dense 检索
+		retrievedDocs, err := s.llmService.RetrieveContext(ctx, opts.Question, s.retrievalTopK, RetrievalOptions{
+			UserID:      opts.UserID,
+			DocumentIDs: opts.DocumentIDs,
+		})
+		metrics.RetrievalLatency = retrievalTimer.ElapsedMs()
+		if err != nil {
+			metrics.ErrorType = "retrieval_failed"
+			metrics.ErrorMsg = err.Error()
+			metrics.TotalLatencyMs = totalTimer.ElapsedMs()
+			observability.LogChatRequest(metrics)
+			if opts.OnError != nil {
+				opts.OnError(fmt.Errorf("retrieve source documents: %w", err))
+			}
+			return fmt.Errorf("retrieve source documents: %w", err)
+		}
+		sources = documentsToSources(retrievedDocs)
+	}
 	metrics.RetrievedChunks = len(sources)
 	metrics.TopK = s.retrievalTopK
 	prompt := buildPrompt(history, sources, opts.Question)

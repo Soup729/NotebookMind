@@ -38,6 +38,7 @@ const initialState: NotebookState = {
   setSelectedDocuments: () => {},
   setMainViewToPdf: () => {},
   setMainViewToGuide: () => {},
+  setMainViewToWorkspace: () => {},
   clearHighlightTarget: () => {},
   setSelectedModel: () => {},
 };
@@ -112,6 +113,16 @@ export const useNotebookStore = create<NotebookStore>()(
         setMainViewToGuide: () => {
           set({
             mainView: 'guide',
+            highlightTarget: null,
+          });
+        },
+
+        // ============================================================
+        // 切换到工作台视图
+        // ============================================================
+        setMainViewToWorkspace: () => {
+          set({
+            mainView: 'workspace',
             highlightTarget: null,
           });
         },
@@ -192,6 +203,7 @@ export const useNotebookActions = () =>
     setSelectedDocuments: state.setSelectedDocuments,
     setMainViewToPdf: state.setMainViewToPdf,
     setMainViewToGuide: state.setMainViewToGuide,
+    setMainViewToWorkspace: state.setMainViewToWorkspace,
     clearHighlightTarget: state.clearHighlightTarget,
     reset: state.reset,
   }));

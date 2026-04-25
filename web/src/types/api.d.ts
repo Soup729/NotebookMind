@@ -167,6 +167,15 @@ export interface SessionListResponse {
   items: Session[];
 }
 
+export interface SessionMemory {
+  summary: string;
+  goal?: string;
+  decisions?: string[];
+  open_questions?: string[];
+  preferences?: string[];
+  updated_at?: string;
+}
+
 // ============================================================
 // 聊天消息 (Chat Messages)
 // ============================================================
@@ -178,6 +187,11 @@ export interface ChatSource {
   chunk_index: number;
   content: string;
   score: number;
+  chunk_type?: string;
+  section_path?: string[];
+  bounding_box?: [number, number, number, number];
+  visual_path?: string;
+  visual_type?: string;
 }
 
 export interface ChatStreamChunk {
@@ -309,7 +323,7 @@ export interface HighlightTarget {
 // 笔记本状态 (Notebook State)
 // ============================================================
 
-export type MainView = 'guide' | 'pdf';
+export type MainView = 'guide' | 'pdf' | 'workspace';
 
 export interface NotebookState {
   // 当前笔记本与会话
@@ -336,6 +350,7 @@ export interface NotebookState {
   setSelectedDocuments: (docIds: string[]) => void;
   setMainViewToPdf: (docId: string, target?: HighlightTarget) => void;
   setMainViewToGuide: () => void;
+  setMainViewToWorkspace: () => void;
   clearHighlightTarget: () => void;
   setSelectedModel: (modelId: string | null) => void;
 }
@@ -410,4 +425,72 @@ export interface DocumentGuideProps {
   guide?: ParsedGuide;
   isLoading: boolean;
   onSuggestedQueryClick?: (query: string) => void;
+}
+
+// ============================================================
+// 导出产物 (Artifact Exports)
+// ============================================================
+
+export type ExportFormat = 'markdown' | 'mindmap' | 'docx' | 'pptx' | 'pdf';
+
+export type NotebookArtifactStatus =
+  | 'outline_ready'
+  | 'generating'
+  | 'completed'
+  | 'failed';
+
+export interface ExportSourceRef {
+  document_id?: string;
+  document_name?: string;
+  page?: number;
+  quote?: string;
+}
+
+export interface ExportOutlineSection {
+  heading: string;
+  bullets: string[];
+  source_refs?: ExportSourceRef[];
+}
+
+export interface ExportOutlineRequest {
+  format: ExportFormat;
+  document_ids: string[];
+  language: string;
+  style: string;
+  length: string;
+  requirements: string;
+  include_citations: boolean;
+}
+
+export interface ConfirmExportRequest {
+  outline: ExportOutlineSection[];
+}
+
+export interface NotebookArtifactContent {
+  format: ExportFormat;
+  language: string;
+  style: string;
+  length: string;
+  requirements: string;
+  outline: ExportOutlineSection[];
+  rendered_text?: string;
+}
+
+export interface NotebookArtifact {
+  id: string;
+  notebook_id: string;
+  type: string;
+  title: string;
+  status: NotebookArtifactStatus;
+  content?: NotebookArtifactContent;
+  source_refs?: ExportSourceRef[];
+  request?: ExportOutlineRequest;
+  file_name?: string;
+  mime_type?: string;
+  task_id?: string;
+  error_msg?: string;
+  version: number;
+  generated_at?: string;
+  created_at: string;
+  updated_at: string;
 }

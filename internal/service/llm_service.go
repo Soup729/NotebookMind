@@ -68,12 +68,12 @@ type llmService struct {
 
 // ReflectionResult contains the reflection analysis
 type ReflectionResult struct {
-	AccuracyScore       int      `json:"accuracy_score"`       // 1-5
-	CompletenessScore   int      `json:"completeness_score"`   // 1-5
-	SourceCoverage      []string `json:"source_coverage"`      // Which sources were used
-	MissingAspects      []string `json:"missing_aspects"`      // What might be missing
+	AccuracyScore         int      `json:"accuracy_score"`         // 1-5
+	CompletenessScore     int      `json:"completeness_score"`     // 1-5
+	SourceCoverage        []string `json:"source_coverage"`        // Which sources were used
+	MissingAspects        []string `json:"missing_aspects"`        // What might be missing
 	SuggestedImprovements []string `json:"suggested_improvements"` // How to improve
-	ConfidenceLevel     string   `json:"confidence_level"`     // high, medium, low
+	ConfidenceLevel       string   `json:"confidence_level"`       // high, medium, low
 }
 
 // NewLLMService creates a new LLM service with multi-provider support
@@ -323,33 +323,48 @@ Return ONLY valid JSON, no markdown formatting.`, question, answer, sourcesStr)
 		return nil, fmt.Errorf("generate reflection: %w", err)
 	}
 
-	// Parse JSON response (simplified)
-	text := strings.TrimSpace(response)
+	return parseReflectionResult(response, sources), nil
+}
+
+func parseReflectionResult(raw string, fallbackSources []string) *ReflectionResult {
+	text := strings.TrimSpace(raw)
 	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
 	text = strings.TrimSuffix(text, "```")
-	text = strings.Trim(text, " \n")
+	text = strings.TrimSpace(text)
 
-	result := &ReflectionResult{
-		AccuracyScore:       4,
-		CompletenessScore:   4,
-		SourceCoverage:      sources,
-		MissingAspects:      []string{},
-		SuggestedImprovements: []string{},
-		ConfidenceLevel:     "medium",
-	}
-
-	// Try to parse as JSON if it looks like JSON
-	if strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}") {
-		// Basic field extraction
-		if strings.Contains(text, `"accuracy_score"`) {
-			// Extract scores using simple string matching
-			result.AccuracyScore = extractJSONInt(text, "accuracy_score", 4)
-			result.CompletenessScore = extractJSONInt(text, "completeness_score", 4)
-			result.ConfidenceLevel = extractJSONString(text, "confidence_level", "medium")
+	var result ReflectionResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return &ReflectionResult{
+			AccuracyScore:         3,
+			CompletenessScore:     3,
+			SourceCoverage:        fallbackSources,
+			MissingAspects:        []string{"reflection parser failed"},
+			SuggestedImprovements: []string{"retry reflection with strict JSON output"},
+			ConfidenceLevel:       "low",
 		}
 	}
-
-	return result, nil
+	if result.AccuracyScore < 1 || result.AccuracyScore > 5 {
+		result.AccuracyScore = 3
+	}
+	if result.CompletenessScore < 1 || result.CompletenessScore > 5 {
+		result.CompletenessScore = 3
+	}
+	if result.SourceCoverage == nil {
+		result.SourceCoverage = []string{}
+	}
+	if result.MissingAspects == nil {
+		result.MissingAspects = []string{}
+	}
+	if result.SuggestedImprovements == nil {
+		result.SuggestedImprovements = []string{}
+	}
+	switch result.ConfidenceLevel {
+	case "high", "medium", "low":
+	default:
+		result.ConfidenceLevel = "medium"
+	}
+	return &result
 }
 
 // AnswerWithImage handles visual question answering
@@ -465,9 +480,9 @@ func (s *llmService) answerWithAnthropicVision(ctx context.Context, question, ba
 				"content": []map[string]interface{}{
 					{"type": "text", "text": question},
 					{"type": "image", "source": map[string]string{
-						"type":      "base64",
+						"type":       "base64",
 						"media_type": mimeType,
-						"data":      base64Image,
+						"data":       base64Image,
 					}},
 				},
 			},
@@ -546,7 +561,7 @@ func (s *llmService) answerWithGeminiVision(ctx context.Context, question, base6
 					{"text": question},
 					{"inline_data": map[string]string{
 						"mime_type": mediaType,
-						"data":       base64Image,
+						"data":      base64Image,
 					}},
 				},
 			},

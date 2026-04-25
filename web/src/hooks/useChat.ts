@@ -280,10 +280,13 @@ export function useSourceCitation() {
    */
   const handleSourceClick = useCallback(
     (source: ChatSource) => {
+      const boundingBox = source.bounding_box && source.bounding_box.length === 4
+        ? source.bounding_box
+        : [0, 0, 0, 0] as [number, number, number, number];
       // 构建高亮目标
       const highlightTarget: HighlightTarget = {
         pageNumber: source.page_number,
-        boundingBox: [0, 0, 0, 0], // 后端暂未提供精确坐标，使用全区域
+        boundingBox,
         sourceId: source.document_id,
         documentId: source.document_id,
         documentName: source.document_name,
@@ -357,10 +360,11 @@ export function useSourceParsing() {
 
       return parts.map((part, index) => {
         if (part.type === 'source') {
+          const matchedSource = 'matchedSource' in part ? part.matchedSource : undefined;
           return {
             type: 'source' as const,
             text: part.content,
-            source: part.matchedSource || sources[0],
+            source: matchedSource || sources[0],
             key: `source-${index}`,
           };
         }

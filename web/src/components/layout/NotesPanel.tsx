@@ -105,8 +105,11 @@ const NoteCard = memo(function NoteCard({ note, onPinToggle, onDelete, onUpdate 
               // 触发全局联动，跳转 PDF
               setMainViewToPdf('doc-id-placeholder', {
                 pageNumber: parseInt(pageStr, 10),
-                boundingBox: [], // 实际场景可通过 Note.metadata 还原 bbox
-                sourceId: ''
+                boundingBox: [0, 0, 0, 0], // 实际场景可通过 Note.metadata 还原 bbox
+                sourceId: '',
+                documentId: 'doc-id-placeholder',
+                documentName: docName.trim(),
+                content: text,
               });
             }}
           >

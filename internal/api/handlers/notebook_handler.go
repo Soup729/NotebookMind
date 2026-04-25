@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"NotebookAI/internal/models"
@@ -20,6 +21,8 @@ import (
 type NotebookHandler struct {
 	notebookService service.NotebookService
 	chatService     service.NotebookChatService
+	artifactService service.NotebookArtifactService
+	exportService   service.NotebookExportService
 	embedder        embeddings.Embedder
 }
 
@@ -27,11 +30,15 @@ type NotebookHandler struct {
 func NewNotebookHandler(
 	notebookService service.NotebookService,
 	chatService service.NotebookChatService,
+	artifactService service.NotebookArtifactService,
+	exportService service.NotebookExportService,
 	embedder embeddings.Embedder,
 ) *NotebookHandler {
 	return &NotebookHandler{
 		notebookService: notebookService,
 		chatService:     chatService,
+		artifactService: artifactService,
+		exportService:   exportService,
 		embedder:        embedder,
 	}
 }
@@ -58,13 +65,31 @@ type notebookCreateSessionRequest struct {
 }
 
 type chatMessageRequest struct {
-	Question     string   `json:"question" binding:"required,min=1,max=4000"`
+	Question    string   `json:"question" binding:"required,min=1,max=4000"`
 	DocumentIDs []string `json:"document_ids"`
 }
 
 type searchRequest struct {
 	Query string `json:"query" binding:"required,min=1,max=1000"`
 	TopK  int    `json:"top_k" binding:"omitempty,min=1,max=20"`
+}
+
+type generateArtifactRequest struct {
+	Type string `json:"type" binding:"required,oneof=briefing comparison timeline topic_clusters study_pack"`
+}
+
+type createExportOutlineRequest struct {
+	Format           string   `json:"format" binding:"required"`
+	DocumentIDs      []string `json:"document_ids"`
+	Language         string   `json:"language"`
+	Style            string   `json:"style"`
+	Length           string   `json:"length"`
+	Requirements     string   `json:"requirements"`
+	IncludeCitations bool     `json:"include_citations"`
+}
+
+type confirmExportRequest struct {
+	Outline []service.ExportOutlineSection `json:"outline" binding:"required"`
 }
 
 // Notebook Handlers
@@ -399,6 +424,78 @@ func (h *NotebookHandler) DeleteSession(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (h *NotebookHandler) GetSessionMemory(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	session, ok := h.loadNotebookSession(c, userID)
+	if !ok {
+		return
+	}
+	memory, err := h.chatService.GetSessionMemory(c.Request.Context(), userID, session.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get session memory"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"memory": memory})
+}
+
+func (h *NotebookHandler) RefreshSessionMemory(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	session, ok := h.loadNotebookSession(c, userID)
+	if !ok {
+		return
+	}
+	memory, err := h.chatService.RefreshSessionMemory(c.Request.Context(), userID, session.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to refresh session memory"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"memory": memory})
+}
+
+func (h *NotebookHandler) ClearSessionMemory(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	session, ok := h.loadNotebookSession(c, userID)
+	if !ok {
+		return
+	}
+	if err := h.chatService.ClearSessionMemory(c.Request.Context(), userID, session.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear session memory"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *NotebookHandler) loadNotebookSession(c *gin.Context, userID string) (*models.ChatSession, bool) {
+	notebookID := c.Param("id")
+	sessionID := c.Param("sessionId")
+	session, err := h.chatService.GetSession(c.Request.Context(), userID, sessionID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return nil, false
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load session"})
+		return nil, false
+	}
+	if session.NotebookID != notebookID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+		return nil, false
+	}
+	return session, true
+}
+
 // StreamChat performs streaming chat with SSE
 func (h *NotebookHandler) StreamChat(c *gin.Context) {
 	userID, ok := getUserID(c)
@@ -421,9 +518,9 @@ func (h *NotebookHandler) StreamChat(c *gin.Context) {
 	if sessionErr != nil {
 		if errors.Is(sessionErr, repository.ErrNotFound) {
 			c.JSON(http.StatusGone, gin.H{
-				"error":  "session not found or expired",
-				"code":   "SESSION_GONE",
-				"hint":   "该对话已被删除或不存在，请创建新对话",
+				"error":     "session not found or expired",
+				"code":      "SESSION_GONE",
+				"hint":      "该对话已被删除或不存在，请创建新对话",
 				"sessionId": sessionID,
 			})
 			return
@@ -507,6 +604,174 @@ func (h *NotebookHandler) SearchNotebook(c *gin.Context) {
 	})
 }
 
+func (h *NotebookHandler) ListArtifacts(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	artifacts, err := h.artifactService.ListArtifacts(c.Request.Context(), userID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "notebook not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list artifacts"})
+		return
+	}
+	items := make([]gin.H, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		items = append(items, artifactResponse(&artifact))
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (h *NotebookHandler) GenerateArtifact(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	var req generateArtifactRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	artifact, err := h.artifactService.GenerateArtifact(c.Request.Context(), userID, c.Param("id"), req.Type)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "notebook not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"artifact": artifactResponse(artifact)})
+}
+
+func (h *NotebookHandler) GetArtifact(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	artifact, err := h.artifactService.GetArtifact(c.Request.Context(), userID, c.Param("id"), c.Param("artifactId"))
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get artifact"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"artifact": artifactResponse(artifact)})
+}
+
+func (h *NotebookHandler) DeleteArtifact(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	if err := h.artifactService.DeleteArtifact(c.Request.Context(), userID, c.Param("id"), c.Param("artifactId")); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete artifact"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *NotebookHandler) CreateExportOutline(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	var req createExportOutlineRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	artifact, err := h.exportService.CreateOutline(c.Request.Context(), userID, c.Param("id"), service.ExportOutlineRequest{
+		Format:           req.Format,
+		DocumentIDs:      req.DocumentIDs,
+		Language:         req.Language,
+		Style:            req.Style,
+		Length:           req.Length,
+		Requirements:     req.Requirements,
+		IncludeCitations: req.IncludeCitations,
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "notebook not found"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"artifact": artifactResponse(artifact)})
+}
+
+func (h *NotebookHandler) ConfirmExport(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	var req confirmExportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	artifact, err := h.exportService.ConfirmOutline(c.Request.Context(), userID, c.Param("id"), c.Param("artifactId"), req.Outline)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"artifact": artifactResponse(artifact)})
+}
+
+func (h *NotebookHandler) DownloadExport(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	artifact, err := h.artifactService.GetArtifact(c.Request.Context(), userID, c.Param("id"), c.Param("artifactId"))
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get artifact"})
+		return
+	}
+	if artifact.Status != models.ArtifactStatusCompleted {
+		c.JSON(http.StatusConflict, gin.H{"error": "export is not completed"})
+		return
+	}
+	if strings.TrimSpace(artifact.FilePath) == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "export file not found"})
+		return
+	}
+	if _, err := os.Stat(artifact.FilePath); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "export file not found"})
+		return
+	}
+	fileName := artifact.FileName
+	if strings.TrimSpace(fileName) == "" {
+		fileName = "notebook-export.md"
+	}
+	c.FileAttachment(artifact.FilePath, fileName)
+}
+
 // Helper functions
 
 func notebookResponse(nb *models.Notebook) gin.H {
@@ -518,6 +783,39 @@ func notebookResponse(nb *models.Notebook) gin.H {
 		"document_cnt": nb.DocumentCnt,
 		"created_at":   nb.CreatedAt,
 		"updated_at":   nb.UpdatedAt,
+	}
+}
+
+func artifactResponse(artifact *models.NotebookArtifact) gin.H {
+	var content any
+	if strings.TrimSpace(artifact.ContentJSON) != "" {
+		_ = json.Unmarshal([]byte(artifact.ContentJSON), &content)
+	}
+	var sourceRefs any
+	if strings.TrimSpace(artifact.SourceRefsJSON) != "" {
+		_ = json.Unmarshal([]byte(artifact.SourceRefsJSON), &sourceRefs)
+	}
+	var request any
+	if strings.TrimSpace(artifact.RequestJSON) != "" {
+		_ = json.Unmarshal([]byte(artifact.RequestJSON), &request)
+	}
+	return gin.H{
+		"id":           artifact.ID,
+		"notebook_id":  artifact.NotebookID,
+		"type":         artifact.Type,
+		"title":        artifact.Title,
+		"status":       artifact.Status,
+		"content":      content,
+		"source_refs":  sourceRefs,
+		"request":      request,
+		"file_name":    artifact.FileName,
+		"mime_type":    artifact.MimeType,
+		"task_id":      artifact.TaskID,
+		"error_msg":    artifact.ErrorMsg,
+		"version":      artifact.Version,
+		"generated_at": artifact.GeneratedAt,
+		"created_at":   artifact.CreatedAt,
+		"updated_at":   artifact.UpdatedAt,
 	}
 }
 

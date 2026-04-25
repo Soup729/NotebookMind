@@ -270,8 +270,8 @@ export const DocumentGuide = memo(function DocumentGuide({
       {/* 建议问题 — 基于文档 FAQ 动态生成 */}
       <SuggestedQueries
         documentId={documentId}
-        faqQuestions={parsedGuide.faq.map((item) => item.question)}
-        onSuggestedQueryClick={onSuggestedQueryClick}
+        faqQuestions={parsedGuide.faq.map((item: FaqItem) => item.question)}
+        onQueryClick={onSuggestedQueryClick}
       />
     </div>
   );

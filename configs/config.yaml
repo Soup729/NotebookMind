@@ -31,7 +31,7 @@ milvus:
   username: ""
   password: ""
   collection_name: "pdf_chunks"
-  dimension: 1536
+  dimension: 2560
 
 llm:
   # Default provider: openai, anthropic, gemini, azure-openai
@@ -103,3 +103,52 @@ vlm:
   api_key: ""                 # API Key（默认复用 OPENAI_API_KEY）
   base_url: ""                # Base URL（默认复用 OPENAI_BASE_URL）
   model: "gpt-4o-mini"        # 模型名称
+
+# ===== Phase 4: 文档级多模态 RAG =====
+multimodal:
+  enabled: true
+  save_visual_regions: true
+  visual_storage_root: "storage/visual"
+  chart_extraction_enabled: true
+  visual_rerank_enabled: true
+  visual_generation_enabled: false
+  max_visual_evidence: 2
+  min_visual_score: 0.35
+
+# ===== Phase 2: 混合检索配置 =====
+hybrid_search:
+  enabled: true               # 是否启用混合检索
+  rrf_k: 60                   # RRF 融合常数
+  top_k: 20                   # 初始召回数量
+  rerank_top_k: 5             # Rerank 后返回数量
+  min_confidence: 0.3         # Failover 置信度阈值
+  max_retries: 1              # 最大重试次数
+
+# Reranker 配置（API Key 从 .env 的 COHERE_API_KEY 读取）
+reranker:
+  provider: "cohere"          # "cohere" | "fallback"
+  model: "rerank-v3.5"        # Cohere Rerank 模型
+  base_url: "https://api.cohere.com/v2"
+  timeout: 5                  # 超时秒数
+
+# 意图重写配置（由 .env 的 ENABLE_INTENT_ROUTING / ENABLE_QUERY_REWRITE 控制）
+intent_rewrite:
+  max_context_terms: 3        # 规则重写时最多提取上下文术语数
+
+# ===== Phase 3: 可信答案生成工作流 =====
+trust_workflow:
+  enabled: false              # 本地评测可用 ENABLE_TRUST_WORKFLOW=true 开启
+  high_risk_only: true        # 仅表格/流程/风险/对比/图表/追问等高风险问题走工作流
+  max_repair_attempts: 1      # v1 最多一次修复，避免延迟和成本失控
+
+# 轻量 Citation Guard：默认 notebook chat 使用证据 ID 绑定段落引用
+citation_guard:
+  enabled: true
+  high_risk_only: false
+  repair_enabled: true
+  max_repair_attempts: 1
+  require_paragraph_citations: true
+  validate_numbers: true
+  validate_entity_phrases: true
+  min_citation_coverage: 0.8
+  fail_closed_for_high_risk: true

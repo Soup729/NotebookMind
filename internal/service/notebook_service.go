@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"NotebookAI/internal/configs"
 	"NotebookAI/internal/models"
 	"NotebookAI/internal/observability"
+	"NotebookAI/internal/parser"
 	"NotebookAI/internal/repository"
 	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/embeddings"
@@ -37,15 +39,151 @@ type NotebookService interface {
 
 	// Process document and generate guide asynchronously
 	ProcessDocumentWithGuide(ctx context.Context, userID, notebookID, documentID string, content string) error
+	IndexParsedChunks(ctx context.Context, userID, notebookID, documentID string, chunks []*parser.Chunk) error
 }
 
 // notebookService implements NotebookService
 type notebookService struct {
-	notebookRepo  repository.NotebookRepository
-	vectorStore   repository.NotebookVectorStore
-	embedder      embeddings.Embedder
-	llm           llms.Model
-	cfg           *configs.LLMConfig
+	notebookRepo repository.NotebookRepository
+	vectorStore  repository.NotebookVectorStore
+	embedder     embeddings.Embedder
+	llm          llms.Model
+	cfg          *configs.LLMConfig
+	bm25Index    *BM25Index
+}
+
+// IndexParsedChunks stores structured parser chunks in the notebook retrieval index.
+func (s *notebookService) IndexParsedChunks(ctx context.Context, userID, notebookID, documentID string, chunks []*parser.Chunk) error {
+	notebookChunks := make([]repository.NotebookChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if chunk == nil {
+			continue
+		}
+		content := strings.TrimSpace(chunk.Content)
+		if content == "" {
+			continue
+		}
+		notebookChunks = append(notebookChunks, parserChunkToNotebookChunk(notebookID, documentID, chunk, content))
+	}
+	if len(notebookChunks) == 0 {
+		return fmt.Errorf("no structured chunks to index")
+	}
+
+	if s.vectorStore != nil {
+		if err := s.vectorStore.DeleteByDocument(ctx, documentID); err != nil {
+			return fmt.Errorf("delete old notebook chunks: %w", err)
+		}
+	}
+	if s.bm25Index != nil {
+		s.bm25Index.RemoveByDocument(documentID)
+	}
+
+	vectors, err := s.embedNotebookChunks(ctx, notebookChunks)
+	if err != nil {
+		return err
+	}
+	if s.vectorStore != nil {
+		if err := s.vectorStore.InsertChunks(ctx, notebookChunks, vectors); err != nil {
+			return fmt.Errorf("insert structured notebook chunks: %w", err)
+		}
+	}
+	if s.bm25Index != nil {
+		for _, chunk := range notebookChunks {
+			chunkID := fmt.Sprintf("nb_%s_%d", documentID, chunk.ChunkIndex)
+			s.bm25Index.IndexDocumentWithMetadata(chunkID, documentID, chunk.Content, notebookChunkMetadata(chunk))
+		}
+	}
+
+	go s.generateGuideAsync(context.Background(), notebookID, documentID, notebookChunks)
+	return nil
+}
+
+func parserChunkToNotebookChunk(notebookID, documentID string, chunk *parser.Chunk, content string) repository.NotebookChunk {
+	pageNumber := int64(chunk.PageNum - 1)
+	if pageNumber < 0 {
+		pageNumber = 0
+	}
+	return repository.NotebookChunk{
+		NotebookID:  notebookID,
+		DocumentID:  documentID,
+		PageNumber:  pageNumber,
+		ChunkIndex:  int64(chunk.ChunkIndex),
+		Content:     content,
+		ChunkType:   string(chunk.ChunkType),
+		ChunkRole:   metadataAnyString(chunk.Metadata, "chunk_role"),
+		ParentID:    chunk.ParentID,
+		SectionPath: mustJSON(chunk.SectionPath),
+		BBox:        bboxJSON(chunk.BBox),
+	}
+}
+
+func metadataAnyString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	if value, ok := metadata[key]; ok && value != nil {
+		return strings.TrimSpace(fmt.Sprintf("%v", value))
+	}
+	return ""
+}
+
+func mustJSON(value any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	if string(data) == "null" {
+		return ""
+	}
+	return string(data)
+}
+
+func bboxJSON(b parser.BoundingBox) string {
+	if b == (parser.BoundingBox{}) {
+		return ""
+	}
+	return fmt.Sprintf("[%g,%g,%g,%g]", b.X0, b.Y0, b.X1, b.Y1)
+}
+
+func (s *notebookService) embedNotebookChunks(ctx context.Context, chunks []repository.NotebookChunk) ([][]float32, error) {
+	vectors := make([][]float32, len(chunks))
+	var embedErr error
+	var wg sync.WaitGroup
+	embedChan := make(chan struct {
+		index  int
+		vector []float32
+		err    error
+	}, len(chunks))
+
+	for i := range chunks {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			vector, err := s.embedder.EmbedQuery(ctx, chunks[idx].Content)
+			embedChan <- struct {
+				index  int
+				vector []float32
+				err    error
+			}{idx, vector, err}
+		}(i)
+	}
+
+	go func() {
+		wg.Wait()
+		close(embedChan)
+	}()
+
+	for item := range embedChan {
+		if item.err != nil {
+			embedErr = item.err
+			continue
+		}
+		vectors[item.index] = item.vector
+	}
+	if embedErr != nil {
+		return nil, fmt.Errorf("embed structured notebook chunks: %w", embedErr)
+	}
+	return vectors, nil
 }
 
 // NewNotebookService creates a new NotebookService
@@ -55,6 +193,7 @@ func NewNotebookService(
 	embedder embeddings.Embedder,
 	llm llms.Model,
 	cfg *configs.LLMConfig,
+	bm25Index *BM25Index,
 ) NotebookService {
 	return &notebookService{
 		notebookRepo: notebookRepo,
@@ -62,6 +201,7 @@ func NewNotebookService(
 		embedder:     embedder,
 		llm:          llm,
 		cfg:          cfg,
+		bm25Index:    bm25Index,
 	}
 }
 
@@ -75,10 +215,10 @@ func (s *notebookService) CreateNotebook(ctx context.Context, userID, title, des
 
 	notebook := &models.Notebook{
 		ID:          uuid.NewString(),
-		UserID:     userID,
-		Title:      title,
+		UserID:      userID,
+		Title:       title,
 		Description: strings.TrimSpace(description),
-		Status:     models.NotebookStatusActive,
+		Status:      models.NotebookStatusActive,
 		DocumentCnt: 0,
 	}
 
@@ -144,6 +284,16 @@ func (s *notebookService) AddDocumentToNotebook(ctx context.Context, notebookID,
 }
 
 func (s *notebookService) RemoveDocumentFromNotebook(ctx context.Context, notebookID, documentID string) error {
+	// 清理BM25索引
+	if s.bm25Index != nil {
+		s.bm25Index.RemoveByDocument(documentID)
+	}
+	// 清理向量存储
+	if s.vectorStore != nil {
+		if err := s.vectorStore.DeleteByDocument(ctx, documentID); err != nil {
+			zap.L().Warn("delete document vectors failed", zap.String("document_id", documentID), zap.Error(err))
+		}
+	}
 	if err := s.notebookRepo.RemoveDocument(ctx, notebookID, documentID); err != nil {
 		return fmt.Errorf("remove document from notebook: %w", err)
 	}
@@ -202,11 +352,11 @@ func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, 
 			continue
 		}
 		notebookChunks = append(notebookChunks, repository.NotebookChunk{
-			NotebookID:  notebookID,
-			DocumentID:  documentID,
-			PageNumber:  int64(idx / 5), // Approximate page number based on chunk index
-			ChunkIndex:  int64(idx),
-			Content:     trimmed,
+			NotebookID: notebookID,
+			DocumentID: documentID,
+			PageNumber: int64(idx / 5), // Approximate page number based on chunk index
+			ChunkIndex: int64(idx),
+			Content:    trimmed,
 		})
 	}
 
@@ -216,9 +366,9 @@ func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, 
 	var embedErr error
 	var wg sync.WaitGroup
 	embedChan := make(chan struct {
-		index   int
-		vector  []float32
-		err     error
+		index  int
+		vector []float32
+		err    error
 	}, len(notebookChunks))
 
 	for i := range notebookChunks {
@@ -270,6 +420,18 @@ func (s *notebookService) ProcessDocumentWithGuide(ctx context.Context, userID, 
 		if err := s.vectorStore.InsertChunks(ctx, notebookChunks, vectors); err != nil {
 			return s.failGuide(ctx, documentID, fmt.Errorf("insert vectors: %w", err))
 		}
+	}
+
+	// Step 4.5: 同步写入BM25索引
+	if s.bm25Index != nil {
+		for _, chunk := range notebookChunks {
+			chunkID := fmt.Sprintf("nb_%s_%d", documentID, chunk.ChunkIndex)
+			s.bm25Index.IndexDocument(chunkID, documentID, chunk.Content)
+		}
+		zap.L().Debug("indexed notebook chunks into BM25",
+			zap.String("document_id", documentID),
+			zap.Int("chunk_count", len(notebookChunks)),
+		)
 	}
 
 	// Step 5: Generate summary and FAQ asynchronously using goroutine
@@ -425,10 +587,10 @@ func (s *notebookService) generateLLMResponse(ctx context.Context, prompt string
 // failGuide marks guide generation as failed
 func (s *notebookService) failGuide(ctx context.Context, documentID string, err error) error {
 	guide := &models.DocumentGuide{
-		ID:        uuid.NewString(),
+		ID:         uuid.NewString(),
 		DocumentID: documentID,
-		Status:    models.GuideStatusFailed,
-		ErrorMsg:  err.Error(),
+		Status:     models.GuideStatusFailed,
+		ErrorMsg:   err.Error(),
 	}
 
 	if writeErr := s.notebookRepo.UpsertGuide(ctx, guide); writeErr != nil {

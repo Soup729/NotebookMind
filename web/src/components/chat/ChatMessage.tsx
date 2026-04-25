@@ -211,15 +211,14 @@ export const ChatMessage = memo(function ChatMessage({
                 )}
               </div>
             ) : (
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                className="leading-relaxed"
-              >
-                {message.content}
+              <div className="leading-relaxed">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {message.content}
+                </ReactMarkdown>
                 {isStreaming && (
                   <span className="inline-block w-0.5 h-4 ml-0.5 bg-current animate-pulse" />
                 )}
-              </ReactMarkdown>
+              </div>
             )}
           </div>
         </div>

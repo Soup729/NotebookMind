@@ -1,0 +1,14 @@
+.git
+.gocache
+api.exe
+worker.exe
+.env
+eval_results_*.json
+logs
+storage
+tmp
+web/node_modules
+web/.next
+web/.env.local
+scripts/__pycache__
+tests/__pycache__

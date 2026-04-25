@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: pdf_ai_postgres
+    container_name: notebookmind_postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -15,13 +15,70 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: pdf_ai_redis
+    container_name: notebookmind_redis
     ports:
       - "6380:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
     command: redis-server --save 60 1 --loglevel warning
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: notebookmind_api
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DSN: host=postgres user=postgres password=postgres dbname=pdf_ai port=5432 sslmode=disable TimeZone=Asia/Shanghai
+      REDIS_ADDR: redis:6379
+      UPLOAD_LOCAL_DIR: /app/tmp/uploads
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./logs:/app/logs
+      - ./storage:/app/storage
+      - ./tmp:/app/tmp
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: notebookmind_worker
+    command: ["/app/worker"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DSN: host=postgres user=postgres password=postgres dbname=pdf_ai port=5432 sslmode=disable TimeZone=Asia/Shanghai
+      REDIS_ADDR: redis:6379
+      UPLOAD_LOCAL_DIR: /app/tmp/uploads
+    volumes:
+      - ./logs:/app/logs
+      - ./storage:/app/storage
+      - ./tmp:/app/tmp
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8081/api/v1
+    container_name: notebookmind_web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8081/api/v1
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
 
 volumes:
   postgres_data:

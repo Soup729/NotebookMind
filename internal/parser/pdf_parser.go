@@ -3,8 +3,12 @@ package parser
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -42,7 +46,7 @@ func (p *PDFParser) ParseDocument(ctx context.Context, filePath string, userID, 
 
 	result := &ParseResult{
 		TotalPages:  reader.NumPage(),
-		Blocks:     make([]StructuredBlock, 0),
+		Blocks:      make([]StructuredBlock, 0),
 		ParseErrors: make([]string, 0),
 	}
 
@@ -96,6 +100,12 @@ func (p *PDFParser) ParseDocument(ctx context.Context, filePath string, userID, 
 		// 解析页面为结构化块
 		blocks := p.parsePageToBlocks(finalText, pageNum)
 		result.Blocks = append(result.Blocks, blocks...)
+
+		// 提取页面中的图片块
+		if p.config.ExtractImages {
+			imageBlocks := p.extractPageImageBlocks(filePath, pageNum)
+			result.Blocks = append(result.Blocks, imageBlocks...)
+		}
 	}
 
 	result.RawText = strings.TrimSpace(fullTextBuilder.String())
@@ -171,13 +181,13 @@ func (p *PDFParser) parsePageToBlocks(pageText string, pageNum int) []Structured
 
 			level := p.detectHeadingLevel(trimmed)
 			blocks = append(blocks, StructuredBlock{
-				ID:          generateBlockID(pageNum, i),
-				Type:        BlockTypeHeading,
-				Content:     trimmed,
-				PageNum:     pageNum,
-				BBox:        BoundingBox{X0: 0, Y0: float32(i * 14), X1: 600, Y1: float32((i + 2) * 14)},
+				ID:           generateBlockID(pageNum, i),
+				Type:         BlockTypeHeading,
+				Content:      trimmed,
+				PageNum:      pageNum,
+				BBox:         BoundingBox{X0: 0, Y0: float32(i * 14), X1: 600, Y1: float32((i + 2) * 14)},
 				HeadingLevel: level,
-				Metadata:    map[string]string{"line_start": fmt.Sprintf("%d", i)},
+				Metadata:     map[string]string{"line_start": fmt.Sprintf("%d", i)},
 			})
 			lineStartIndex = i + 1
 			continue
@@ -272,11 +282,11 @@ func (p *PDFParser) parseTableBlock(tableContent string, pageNum int, lineStart 
 	}
 
 	return StructuredBlock{
-		ID:       generateBlockID(pageNum, lineStart),
-		Type:     BlockTypeTable,
-		Content:  textBuilder.String(),
-		PageNum:  pageNum,
-		BBox:     BoundingBox{X0: 50, Y0: float32(lineStart * 14), X1: 550, Y1: float32((lineStart + len(lines) + 2) * 14)},
+		ID:      generateBlockID(pageNum, lineStart),
+		Type:    BlockTypeTable,
+		Content: textBuilder.String(),
+		PageNum: pageNum,
+		BBox:    BoundingBox{X0: 50, Y0: float32(lineStart * 14), X1: 550, Y1: float32((lineStart + len(lines) + 2) * 14)},
 		TableData: &TableData{
 			Headers: headers,
 			Rows:    rows,
@@ -394,29 +404,182 @@ func (p *PDFParser) calculateTextDensity(text string) float32 {
 	return float32(nonSpace) / float32(len(runes))
 }
 
-// performPageOCR 执行单页 OCR
+// performPageOCR 执行单页 OCR：将 PDF 页渲染为图片，调用 OCR Provider 识别
 func (p *PDFParser) performPageOCR(ctx context.Context, filePath string, pageNum int) (string, error) {
+	if p.ocrProvider == nil || !p.ocrProvider.IsAvailable() {
+		return "", fmt.Errorf("OCR provider not available")
+	}
+
+	// 渲染 PDF 页为 PNG 图片
+	imageBytes, err := p.renderPDFPageToImage(filePath, pageNum)
+	if err != nil {
+		return "", fmt.Errorf("render pdf page %d to image: %w", pageNum, err)
+	}
+
+	// 调用 OCR 识别
+	ocrText, err := p.ocrProvider.RecognizePage(ctx, imageBytes, "image/png")
+	if err != nil {
+		return "", fmt.Errorf("ocr recognize page %d: %w", pageNum, err)
+	}
+
+	return ocrText, nil
+}
+
+// renderPDFPageToImage 将 PDF 单页渲染为 PNG 图片二进制
+// 优先使用 pdftoppm（poppler-utils），不可用时降级提取内嵌图片
+func (p *PDFParser) renderPDFPageToImage(filePath string, pageNum int) ([]byte, error) {
+	// 尝试 pdftoppm 渲染
+	if imageBytes, err := renderPageWithPdftoppm(filePath, pageNum); err == nil {
+		return imageBytes, nil
+	}
+
+	zap.L().Debug("pdftoppm not available, falling back to embedded image extraction",
+		zap.Int("page", pageNum),
+	)
+
+	// 降级：从 PDF 中提取内嵌图片
+	return p.extractEmbeddedPageImage(filePath, pageNum)
+}
+
+// renderPageWithPdftoppm 使用 pdftoppm 命令行工具渲染 PDF 页为 PNG
+func renderPageWithPdftoppm(filePath string, pageNum int) ([]byte, error) {
+	// pdftoppm -png -f N -l N -r 150 input.pdf output_prefix
+	cmd := exec.Command("pdftoppm",
+		"-png",
+		"-f", fmt.Sprintf("%d", pageNum),
+		"-l", fmt.Sprintf("%d", pageNum),
+		"-r", "150", // 150 DPI，平衡精度与速度
+		filePath,
+		"-",
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("pdftoppm failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	imageBytes := stdout.Bytes()
+	if len(imageBytes) == 0 {
+		return nil, fmt.Errorf("pdftoppm produced empty output")
+	}
+
+	return imageBytes, nil
+}
+
+// extractEmbeddedPageImage 从 PDF 页中提取内嵌图片作为降级方案
+func (p *PDFParser) extractEmbeddedPageImage(filePath string, pageNum int) ([]byte, error) {
 	f, reader, err := pdf.Open(filePath)
 	if err != nil {
-		return "", fmt.Errorf("reopen pdf for ocr: %w", err)
+		return nil, fmt.Errorf("reopen pdf for image extraction: %w", err)
 	}
 	defer f.Close()
 
 	page := reader.Page(pageNum)
 	if page.V.IsNull() {
-		return "", fmt.Errorf("page %d is null", pageNum)
+		return nil, fmt.Errorf("page %d is null", pageNum)
 	}
 
-	pageText, err := page.GetPlainText(nil)
+	// 尝试提取页面中的图片资源
+	// ledongthuc/pdf 不直接支持图片提取，降级返回页面纯文本
+	// 在没有 pdftoppm 的环境下，OCR 将无法使用
+	return nil, fmt.Errorf("embedded image extraction not supported by current PDF library; install poppler-utils (pdftoppm) for OCR support")
+}
+
+// extractPageImageBlocks 从 PDF 页面中提取图片并构造 BlockTypeImage 块
+// 使用 pdfimages 命令行工具提取内嵌图片，无 pdfimages 时降级为空
+func (p *PDFParser) extractPageImageBlocks(filePath string, pageNum int) []StructuredBlock {
+	blocks := make([]StructuredBlock, 0)
+
+	// 使用 pdfimages 提取当前页图片
+	imageDataList, err := extractImagesWithPdfImages(filePath, pageNum)
 	if err != nil {
-		return "", err
+		zap.L().Debug("pdfimages extraction skipped",
+			zap.Int("page", pageNum),
+			zap.Error(err),
+		)
+		return blocks
 	}
 
-	if p.ocrProvider != nil {
-		return pageText, nil
+	for i, imgData := range imageDataList {
+		// 过滤太小的图片（图标、装饰线等）
+		if imgData.Width > 0 && imgData.Height > 0 &&
+			(imgData.Width < p.config.ImageMinSize || imgData.Height < p.config.ImageMinSize) {
+			continue
+		}
+
+		block := StructuredBlock{
+			ID:        fmt.Sprintf("blk_img_p%d_%04d", pageNum, i),
+			Type:      BlockTypeImage,
+			Content:   fmt.Sprintf("[图片: 第%d页 第%d张]", pageNum, i+1),
+			PageNum:   pageNum,
+			BBox:      imgData.BBox,
+			ImageData: imgData,
+			Metadata: map[string]string{
+				"image_index": fmt.Sprintf("%d", i),
+			},
+		}
+		blocks = append(blocks, block)
 	}
 
-	return pageText, nil
+	return blocks
+}
+
+// extractImagesWithPdfImages 使用 poppler 的 pdfimages 命令行提取 PDF 内嵌图片
+func extractImagesWithPdfImages(filePath string, pageNum int) ([]*ImageData, error) {
+	// pdfimages -png -f N -l N input.pdf output_prefix
+	// 这会输出多个 PNG 文件，我们读取它们
+	cmd := exec.Command("pdfimages",
+		"-png",
+		"-f", fmt.Sprintf("%d", pageNum),
+		"-l", fmt.Sprintf("%d", pageNum),
+		filePath,
+		"-",
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("pdfimages failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	// pdfimages 无法直接输出到 stdout 的多个文件
+	// 改用临时目录方案
+	return extractImagesWithPdfImagesTempDir(filePath, pageNum)
+}
+
+// extractImagesWithPdfImagesTempDir 使用临时目录提取 PDF 图片
+func extractImagesWithPdfImagesTempDir(filePath string, pageNum int) ([]*ImageData, error) {
+	// 创建临时目录
+	tmpDir, err := mkTempDir()
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer removeTempDir(tmpDir)
+
+	outputPrefix := filepath.Join(tmpDir, "img")
+
+	cmd := exec.Command("pdfimages",
+		"-png",
+		"-f", fmt.Sprintf("%d", pageNum),
+		"-l", fmt.Sprintf("%d", pageNum),
+		filePath,
+		outputPrefix,
+	)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("pdfimages failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	// 读取输出的图片文件
+	return readImageFilesFromDir(tmpDir, pageNum)
 }
 
 // enrichImagesWithVLM 使用视觉语言模型为图片生成描述
@@ -437,7 +600,19 @@ func (p *PDFParser) enrichImagesWithVLM(ctx context.Context, result *ParseResult
 		zap.Int("batch_size", p.config.VLMBatchSize),
 	)
 
-	prompt := `请用中文简要描述这张图片的内容。如果这是图表、表格截图或示意图，请重点描述其中的数据趋势、关键信息或结构关系。输出控制在100字以内。`
+	prompt := `请分析这张文档图片区域，并只输出 JSON，不要输出 markdown。
+字段：
+{
+  "visual_type": "chart|table|diagram|photo|image|unknown",
+  "summary": "100字以内中文摘要",
+  "entities": ["关键实体"],
+  "numbers": ["关键数字"],
+  "axes": {"x": "横轴或空", "y": "纵轴或空"},
+  "series": [{"name": "系列名", "values": ["可见数值或趋势"]}],
+  "trends": ["关键趋势"],
+  "confidence": 0.0
+}
+如果无法确定，请 visual_type 使用 unknown，summary 说明可见内容。`
 
 	for _, img := range imageBlocks {
 		if img.ImageBytes == nil || len(img.ImageBytes) == 0 {
@@ -452,17 +627,68 @@ func (p *PDFParser) enrichImagesWithVLM(ctx context.Context, result *ParseResult
 			)
 			img.Caption = ""
 		} else {
-			img.Caption = desc
+			img.VisualJSON = normalizeVLMJSON(desc)
+			img.VisualType = visualTypeFromJSON(img.VisualJSON)
+			img.Caption = visualSummaryFromJSON(img.VisualJSON)
+			if img.Caption == "" {
+				img.Caption = desc
+			}
 		}
 	}
+}
+
+func normalizeVLMJSON(raw string) string {
+	text := strings.TrimSpace(raw)
+	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
+	text = strings.TrimSuffix(text, "```")
+	return strings.TrimSpace(text)
+}
+
+func visualTypeFromJSON(raw string) string {
+	var payload struct {
+		VisualType string `json:"visual_type"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "image"
+	}
+	switch strings.ToLower(strings.TrimSpace(payload.VisualType)) {
+	case "chart", "table", "diagram", "photo", "image", "unknown":
+		return strings.ToLower(strings.TrimSpace(payload.VisualType))
+	default:
+		return "image"
+	}
+}
+
+func visualSummaryFromJSON(raw string) string {
+	var payload struct {
+		Summary string   `json:"summary"`
+		Trends  []string `json:"trends"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	parts := []string{strings.TrimSpace(payload.Summary)}
+	for _, trend := range payload.Trends {
+		if strings.TrimSpace(trend) != "" {
+			parts = append(parts, strings.TrimSpace(trend))
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
 // ========== 辅助判断函数 ==========
 
 var (
-	headingPattern = regexp.MustCompile(`^(#{1,6}\s|第[一二三四五六七八九十\d]+[章节部分]|[\d]+[\.、]\s*\p{Han}A-Z])`)
-	listItemPattern = regexp.MustCompile(`^(\s*[-•·\*]\s|\s*\d+[\.)]、\s|\s*[a-z][\.\)]\s)`)
-	separatorPattern = regexp.MustCompile(`^[\s\-|:=+]{3,}$`)
+	headingPattern          = regexp.MustCompile(`^(#{1,6}\s|第[一二三四五六七八九十\d]+[章节部分]|[\d]+[\.、]\s*\p{Han}A-Z])`)
+	listItemPattern         = regexp.MustCompile(`^(\s*[-•·\*]\s|\s*\d+[\.)]、\s|\s*[a-z][\.\)]\s)`)
+	separatorPattern        = regexp.MustCompile(`^[\s\-|:=+]{3,}$`)
+	orderedItemPattern      = regexp.MustCompile(`^\d+[.．]\s`)
+	chapterHeadingPattern   = regexp.MustCompile(`^第[一二三四五六七八九十\d]+章`)
+	sectionHeadingPattern   = regexp.MustCompile(`^第[一二三四五六七八九十\d]+节`)
+	level2NumHeadingPattern = regexp.MustCompile(`^[\d]+\.[\d]*\.?\s`)
+	level3NumHeadingPattern = regexp.MustCompile(`^[\d]+\.[\d]+\.[\d]*\.?\s`)
+	multiSpacePattern       = regexp.MustCompile(`\s{2,}`)
 )
 
 // isHeading 判断是否是标题行
@@ -476,7 +702,7 @@ func (p *PDFParser) isHeading(line string) bool {
 		return true
 	}
 
-	if matched := regexp.MustCompile(`^[\d]+[\.\．]\s`).MatchString(trimmed); matched {
+	if orderedItemPattern.MatchString(trimmed) {
 		return utf8.RuneCountInString(trimmed) <= 100
 	}
 
@@ -502,17 +728,17 @@ func (p *PDFParser) detectHeadingLevel(line string) HeadingLevel {
 		return HeadingLevel(count)
 	}
 
-	if matched := regexp.MustCompile(`^第[一二三四五六七八九十\d]+章`).MatchString(trimmed); matched {
+	if matched := chapterHeadingPattern.MatchString(trimmed); matched {
 		return HeadingH1
 	}
-	if matched := regexp.MustCompile(`^第[一二三四五六七八九十\d]+节`).MatchString(trimmed); matched {
+	if matched := sectionHeadingPattern.MatchString(trimmed); matched {
 		return HeadingH2
 	}
 
-	if matched := regexp.MustCompile(`^[\d]+\.[\d]*\.?\s`).MatchString(trimmed); matched {
+	if matched := level2NumHeadingPattern.MatchString(trimmed); matched {
 		return HeadingH2
 	}
-	if matched := regexp.MustCompile(`^[\d]+\.[\d]+\.[\d]*\.?\s`).MatchString(trimmed); matched {
+	if matched := level3NumHeadingPattern.MatchString(trimmed); matched {
 		return HeadingH3
 	}
 
@@ -590,9 +816,8 @@ func isAllUpper(s string) bool {
 }
 
 func fieldsByMultipleSpaces(s string) string {
-	re := regexp.MustCompile(`\s{2,}`)
-	_ = re // 避免未使用警告 - 实际在 isTableRow 中使用
-	return s // 此函数仅作为辅助判断使用
+	_ = multiSpacePattern // 预编译的 pattern
+	return s              // 此函数仅作为辅助判断使用
 }
 
 func min(a, b int) int {
@@ -602,25 +827,90 @@ func min(a, b int) int {
 	return b
 }
 
+// mkTempDir 创建临时目录
+func mkTempDir() (string, error) {
+	return os.MkdirTemp("", "nbm_pdf_img_*")
+}
+
+// removeTempDir 删除临时目录
+func removeTempDir(dir string) {
+	_ = os.RemoveAll(dir)
+}
+
+// readImageFilesFromDir 从目录读取图片文件并转为 ImageData 列表
+func readImageFilesFromDir(dir string, pageNum int) ([]*ImageData, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read temp dir: %w", err)
+	}
+
+	images := make([]*ImageData, 0, len(entries))
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		lowerName := strings.ToLower(name)
+
+		// 只处理图片文件
+		if !strings.HasSuffix(lowerName, ".png") &&
+			!strings.HasSuffix(lowerName, ".jpg") &&
+			!strings.HasSuffix(lowerName, ".jpeg") {
+			continue
+		}
+
+		filePath := filepath.Join(dir, name)
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		// 过滤太小的文件（可能是掩码图）
+		if len(data) < 100 {
+			continue
+		}
+
+		mimeType := "image/png"
+		if strings.HasSuffix(lowerName, ".jpg") || strings.HasSuffix(lowerName, ".jpeg") {
+			mimeType = "image/jpeg"
+		}
+
+		imgData := &ImageData{
+			PageIndex:  pageNum - 1,
+			BBox:       BoundingBox{X0: 0, Y0: 0, X1: 600, Y1: 800}, // 近似 bbox
+			ImageBytes: data,
+			MimeType:   mimeType,
+		}
+
+		images = append(images, imgData)
+	}
+
+	return images, nil
+}
+
 // io 包导入声明（用于 pdf 库兼容）
 var _ = io.EOF
 
 // DefaultConfig 返回默认解析器配置
 func DefaultConfig() *ParserConfig {
 	return &ParserConfig{
-		ChunkSize:         1000,
-		ChunkOverlap:      200,
-		ChildChunkSize:    300,
-		ExtractTables:     true,
-		TableMaxRows:      100,
-		TableMaxCols:      20,
-		ExtractImages:     true,
-		ImageMinSize:      50,
-		VLMEnabled:        false,
-		VLMBatchSize:      5,
-		OCRThreshold:      0.1,
-		OCREnabled:        true,
-		DetectHeadings:    true,
-		MinHeadingFontSize: 1.2,
+		ChunkSize:              1000,
+		ChunkOverlap:           200,
+		ChildChunkSize:         300,
+		ExtractTables:          true,
+		TableMaxRows:           100,
+		TableMaxCols:           20,
+		ExtractImages:          true,
+		ImageMinSize:           50,
+		VLMEnabled:             false,
+		VLMBatchSize:           5,
+		SaveVisualRegions:      true,
+		VisualStorageRoot:      "storage/visual",
+		ChartExtractionEnabled: true,
+		OCRThreshold:           0.1,
+		OCREnabled:             true,
+		DetectHeadings:         true,
+		MinHeadingFontSize:     1.2,
 	}
 }
