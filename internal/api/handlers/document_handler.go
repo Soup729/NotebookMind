@@ -24,14 +24,16 @@ type DocumentHandler struct {
 	producer        worker.TaskProducer
 	documentService service.DocumentService
 	notebookService service.NotebookService
+	graphService    service.KnowledgeGraphService
 	uploadCfg       configs.UploadConfig
 }
 
-func NewDocumentHandler(producer worker.TaskProducer, documentService service.DocumentService, notebookService service.NotebookService, uploadCfg configs.UploadConfig) *DocumentHandler {
+func NewDocumentHandler(producer worker.TaskProducer, documentService service.DocumentService, notebookService service.NotebookService, graphService service.KnowledgeGraphService, uploadCfg configs.UploadConfig) *DocumentHandler {
 	return &DocumentHandler{
 		producer:        producer,
 		documentService: documentService,
 		notebookService: notebookService,
+		graphService:    graphService,
 		uploadCfg:       uploadCfg,
 	}
 }
@@ -161,6 +163,45 @@ func (h *DocumentHandler) GetDocument(c *gin.Context) {
 	c.JSON(http.StatusOK, documentResponse(document, ""))
 }
 
+func (h *DocumentHandler) GetDocumentPDF(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	document, err := h.documentService.Get(c.Request.Context(), userID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load document"})
+		return
+	}
+	if strings.TrimSpace(document.StoredPath) == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "document file not found"})
+		return
+	}
+	if _, err := os.Stat(document.StoredPath); err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to access document file"})
+		return
+	}
+
+	fileName := document.FileName
+	if strings.TrimSpace(fileName) == "" {
+		fileName = document.ID + ".pdf"
+	}
+	c.Header("Content-Type", "application/pdf")
+	c.Header("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, strings.ReplaceAll(fileName, `"`, "")))
+	c.Header("Cache-Control", "private, max-age=300")
+	c.File(document.StoredPath)
+}
+
 func (h *DocumentHandler) DeleteDocument(c *gin.Context) {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -168,7 +209,36 @@ func (h *DocumentHandler) DeleteDocument(c *gin.Context) {
 		return
 	}
 
-	if err := h.documentService.Delete(c.Request.Context(), userID, c.Param("id")); err != nil {
+	documentID := c.Param("id")
+	document, err := h.documentService.Get(c.Request.Context(), userID, documentID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load document"})
+		return
+	}
+
+	if strings.TrimSpace(document.NotebookID) != "" {
+		if err := h.notebookService.RemoveDocumentFromNotebook(c.Request.Context(), document.NotebookID, documentID); err != nil && !errors.Is(err, repository.ErrNotFound) {
+			zap.L().Warn("cleanup notebook document data failed",
+				zap.String("notebook_id", document.NotebookID),
+				zap.String("document_id", documentID),
+				zap.Error(err),
+			)
+		}
+	}
+	if h.graphService != nil {
+		if err := h.graphService.DeleteDocumentGraph(c.Request.Context(), documentID); err != nil {
+			zap.L().Warn("cleanup document graph data failed",
+				zap.String("document_id", documentID),
+				zap.Error(err),
+			)
+		}
+	}
+
+	if err := h.documentService.Delete(c.Request.Context(), userID, documentID); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "document not found"})
 			return

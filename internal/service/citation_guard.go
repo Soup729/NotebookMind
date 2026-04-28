@@ -20,7 +20,7 @@ func BuildEvidencePackFromNotebookSources(sources []NotebookChatSource) Evidence
 		if content == "" {
 			continue
 		}
-		key := fmt.Sprintf("%s:%d:%d:%s", src.DocumentID, src.PageNumber, src.ChunkIndex, strings.Join(strings.Fields(content), " "))
+		key := notebookSourceEvidenceKey(src)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -45,14 +45,82 @@ func BuildEvidencePackFromNotebookSources(sources []NotebookChatSource) Evidence
 }
 
 func RenderEvidenceCitations(answer string, pack EvidencePack) string {
-	return evidenceIDPattern.ReplaceAllStringFunc(answer, func(match string) string {
+	rendered := evidenceIDPattern.ReplaceAllStringFunc(answer, func(match string) string {
 		id := strings.Trim(match, "[]")
 		item, ok := pack.SourceByID(id)
 		if !ok {
 			return match
 		}
-		return fmt.Sprintf("[Source: %s, Page %d]", item.DocumentName, item.PageNumber+1)
+		return fmt.Sprintf("[Source: %s, Page %d, %s]", item.DocumentName, item.PageNumber+1, item.ID)
 	})
+	return collapseConsecutiveDuplicateCitations(rendered)
+}
+
+var trailingSourceCitationRunPattern = regexp.MustCompile(`(?:\s*\[Source:\s*[^\]]+\])+\s*$`)
+var sourceCitationDocumentPagePattern = regexp.MustCompile(`\[Source:\s*([^,\]]+),\s*Page\s+(\d+)(?:,\s*E\d+)?\]`)
+
+func collapseConsecutiveDuplicateCitations(answer string) string {
+	paragraphs := answerParagraphs(answer)
+	if len(paragraphs) < 2 {
+		return answer
+	}
+	citations := make([]string, len(paragraphs))
+	for i, paragraph := range paragraphs {
+		citations[i] = normalizedTrailingCitationKey(paragraph)
+	}
+	for i := 0; i < len(paragraphs)-1; i++ {
+		if citations[i] == "" || citations[i] != citations[i+1] {
+			continue
+		}
+		paragraphs[i] = strings.TrimSpace(trailingSourceCitationRunPattern.ReplaceAllString(paragraphs[i], ""))
+	}
+	return strings.Join(paragraphs, "\n\n")
+}
+
+func normalizedTrailingCitationKey(paragraph string) string {
+	trailing := strings.TrimSpace(trailingSourceCitationRunPattern.FindString(paragraph))
+	if trailing == "" {
+		return ""
+	}
+	matches := sourceCitationDocumentPagePattern.FindAllStringSubmatch(trailing, -1)
+	if len(matches) == 0 {
+		return trailing
+	}
+	keys := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		keys = append(keys, strings.ToLower(strings.TrimSpace(match[1]))+"|"+strings.TrimSpace(match[2]))
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ";")
+}
+
+func annotateSourcesWithCitationIDs(sources []NotebookChatSource) []NotebookChatSource {
+	if len(sources) == 0 {
+		return sources
+	}
+	pack := BuildEvidencePackFromNotebookSources(sources)
+	idByKey := make(map[string]string, len(pack.Items))
+	for _, item := range pack.Items {
+		key := fmt.Sprintf("%s:%d:%s:%s", item.DocumentID, item.PageNumber, item.ChunkID, strings.Join(strings.Fields(item.Content), " "))
+		idByKey[key] = item.ID
+	}
+
+	annotated := make([]NotebookChatSource, len(sources))
+	copy(annotated, sources)
+	for i := range annotated {
+		if id, ok := idByKey[notebookSourceEvidenceKey(annotated[i])]; ok {
+			annotated[i].CitationID = id
+		}
+	}
+	return annotated
+}
+
+func notebookSourceEvidenceKey(src NotebookChatSource) string {
+	content := strings.TrimSpace(src.Content)
+	return fmt.Sprintf("%s:%d:%s:%s", src.DocumentID, src.PageNumber, fmt.Sprintf("%s:%d", src.DocumentID, src.ChunkIndex), strings.Join(strings.Fields(content), " "))
 }
 
 func evidenceIDsInText(text string) []string {

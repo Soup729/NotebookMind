@@ -41,6 +41,7 @@ export const API_ENDPOINTS = {
 
   // 文档
   documents: (notebookId: string) => `/notebooks/${notebookId}/documents`,
+  documentFile: (documentId: string) => `/documents/${documentId}`,
   document: (notebookId: string, documentId: string) =>
     `/notebooks/${notebookId}/documents/${documentId}`,
   documentGuide: (notebookId: string, documentId: string) =>
@@ -63,6 +64,9 @@ export const API_ENDPOINTS = {
 
   // 搜索
   search: (notebookId: string) => `/notebooks/${notebookId}/search`,
+
+  // 知识图谱
+  knowledgeGraph: (notebookId: string) => `/notebooks/${notebookId}/graph`,
 
   // 导出
   exportOutline: (notebookId: string) => `/notebooks/${notebookId}/exports/outline`,
@@ -144,6 +148,7 @@ export interface SSEChunk {
   sources: Array<{
     document_id: string;
     document_name: string;
+    citation_id?: string;
     page_number: number;
     chunk_index: number;
     content: string;
@@ -292,12 +297,13 @@ export const truncateText = (text: string, maxLength: number): string => {
 };
 
 // 来源徽章正则匹配
-export const SOURCE_PATTERN = /\[Source:\s*([^,\]]+)(?:,\s*Page\s*(\d+))?\]/g;
+export const SOURCE_PATTERN = /\[Source:\s*([^,\]]+)(?:,\s*Page\s*(\d+))?(?:,\s*(E\d+))?\]/g;
 
 export interface ParsedSource {
   fullMatch: string;
   documentName: string;
   pageNumber?: number;
+  citationId?: string;
 }
 
 // 解析来源标记
@@ -325,6 +331,7 @@ export function parseSourceCitations(text: string): {
       fullMatch: match[0],
       documentName: match[1].trim(),
       pageNumber: match[2] ? parseInt(match[2], 10) : undefined,
+      citationId: match[3],
     };
     sources.push(source);
 

@@ -30,8 +30,10 @@ interface SourcesPanelProps {
   documents: Document[];
   isLoading: boolean;
   selectedIds: string[];
+  activeDocumentId?: string | null;
   onSelectionChange: (ids: string[]) => void;
   onUpload?: (file: File) => void;
+  onOpen?: (docId: string) => void;
   onRemove?: (docId: string) => void;
   className?: string;
 }
@@ -68,27 +70,46 @@ const StatusIcon = memo(function StatusIcon({
 interface DocumentItemProps {
   document: Document;
   isSelected: boolean;
+  isActive?: boolean;
   onToggle: () => void;
+  onOpen?: () => void;
   onRemove?: () => void;
 }
 
 const DocumentItem = memo(function DocumentItem({
   document,
   isSelected,
+  isActive = false,
   onToggle,
+  onOpen,
   onRemove,
 }: DocumentItemProps) {
+  const canOpen = document.status === 'completed' && Boolean(onOpen);
+
   return (
     <div
       className={cn(
-        'group flex items-start gap-3 p-3 rounded-lg',
+        'group relative flex items-start gap-3 p-3 pb-8 rounded-lg border border-transparent',
         'hover:bg-muted/50 transition-colors',
-        isSelected && 'bg-muted'
+        canOpen && 'cursor-pointer',
+        isSelected && 'bg-muted',
+        isActive && 'border-primary/40 bg-primary/5'
       )}
+      onClick={canOpen ? onOpen : undefined}
+      role={canOpen ? 'button' : undefined}
+      tabIndex={canOpen ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (!canOpen) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpen?.();
+        }
+      }}
     >
       {/* 选择框 */}
       <Checkbox
         checked={isSelected}
+        onClick={(event) => event.stopPropagation()}
         onCheckedChange={onToggle}
         className="mt-0.5"
         disabled={document.status !== 'completed'}
@@ -132,9 +153,12 @@ const DocumentItem = memo(function DocumentItem({
         <Button
           variant="ghost"
           size="icon"
-          className="h-6 w-6 opacity-0 group-hover:opacity-100 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10 flex-shrink-0"
-          onClick={onRemove}
-          title="移除文档"
+          className="absolute bottom-2 right-2 h-6 w-6 opacity-0 group-hover:opacity-100 hover:!opacity-100 hover:text-destructive hover:bg-destructive/10"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          title="删除文档"
         >
           <Trash2 className="w-3 h-3" />
         </Button>
@@ -152,8 +176,10 @@ export const SourcesPanel = memo(function SourcesPanel({
   documents,
   isLoading,
   selectedIds,
+  activeDocumentId,
   onSelectionChange,
   onUpload,
+  onOpen,
   onRemove,
   className,
 }: SourcesPanelProps) {
@@ -359,7 +385,9 @@ export const SourcesPanel = memo(function SourcesPanel({
                 key={doc.id}
                 document={doc}
                 isSelected={selectedIds.includes(doc.id)}
+                isActive={activeDocumentId === doc.id}
                 onToggle={() => handleToggle(doc.id)}
+                onOpen={onOpen ? () => onOpen(doc.id) : undefined}
                 onRemove={onRemove ? () => onRemove(doc.id) : undefined}
               />
             ))}

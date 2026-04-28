@@ -26,16 +26,18 @@ type DocumentProcessor struct {
 	documents       repository.DocumentRepository
 	notebookService service.NotebookService
 	exportService   service.NotebookExportService
+	graphService    service.KnowledgeGraphService
 	parser          parser.ParserService
 	bm25Index       *service.BM25Index
 }
 
-func NewDocumentProcessor(llmService service.LLMService, documents repository.DocumentRepository, notebookService service.NotebookService, exportService service.NotebookExportService, parserSvc parser.ParserService, bm25Index *service.BM25Index) *DocumentProcessor {
+func NewDocumentProcessor(llmService service.LLMService, documents repository.DocumentRepository, notebookService service.NotebookService, exportService service.NotebookExportService, graphService service.KnowledgeGraphService, parserSvc parser.ParserService, bm25Index *service.BM25Index) *DocumentProcessor {
 	return &DocumentProcessor{
 		llmService:      llmService,
 		documents:       documents,
 		notebookService: notebookService,
 		exportService:   exportService,
+		graphService:    graphService,
 		parser:          parserSvc,
 		bm25Index:       bm25Index,
 	}
@@ -297,6 +299,15 @@ func (p *DocumentProcessor) triggerNotebookIndexing(ctx context.Context, payload
 				zap.String("document_id", payload.DocumentID),
 				zap.String("notebook_id", doc.NotebookID),
 			)
+		}
+		if p.graphService != nil {
+			if err := p.graphService.UpdateDocumentGraph(guideCtx, payload.UserID, doc.NotebookID, payload.DocumentID, chunks); err != nil {
+				zap.L().Warn("failed to update notebook knowledge graph",
+					zap.String("document_id", payload.DocumentID),
+					zap.String("notebook_id", doc.NotebookID),
+					zap.Error(err),
+				)
+			}
 		}
 	}()
 }

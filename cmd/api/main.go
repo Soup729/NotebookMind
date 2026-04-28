@@ -20,6 +20,12 @@ import (
 )
 
 func main() {
+	if wantsHelp(os.Args[1:]) {
+		fmt.Println("Usage: go run ./cmd/api")
+		fmt.Println("Starts the NotebookMind API server using configs/config.yaml.")
+		return
+	}
+
 	cfg, err := configs.LoadConfig("configs/config.yaml")
 	if err != nil {
 		panic(fmt.Sprintf("Fatal error loading config: %v", err))
@@ -86,4 +92,13 @@ func main() {
 	}
 
 	zap.L().Info("Server exiting")
+}
+
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" || arg == "help" {
+			return true
+		}
+	}
+	return false
 }

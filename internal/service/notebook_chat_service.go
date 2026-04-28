@@ -23,6 +23,7 @@ type NotebookChatSource struct {
 	NotebookID   string    `json:"notebook_id"`
 	DocumentID   string    `json:"document_id"`
 	DocumentName string    `json:"document_name"`
+	CitationID   string    `json:"citation_id,omitempty"`
 	PageNumber   int64     `json:"page_number"`
 	ChunkIndex   int64     `json:"chunk_index"`
 	Content      string    `json:"content"`
@@ -32,6 +33,20 @@ type NotebookChatSource struct {
 	BoundingBox  []float32 `json:"bounding_box,omitempty"`
 	VisualPath   string    `json:"visual_path,omitempty"`
 	VisualType   string    `json:"visual_type,omitempty"`
+}
+
+type SelectedDocumentContext struct {
+	DocumentID   string
+	DocumentName string
+	Summary      string
+	KeyPoints    []string
+	FAQ          []DocumentGuideFAQ
+	GuideStatus  string
+}
+
+type DocumentGuideFAQ struct {
+	Question string `json:"question"`
+	Answer   string `json:"answer"`
 }
 
 // NotebookChatReply represents a streaming chat response
@@ -292,11 +307,13 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 
 			sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
 		}
+		sources = annotateSourcesWithCitationIDs(sources)
 	}
 
 	// Step 6: Build prompt with strict format
 	memoryPrompt := s.memoryPrompt(ctx, userID, sessionID)
-	prompt := s.buildPrompt(history, sources, question, memoryPrompt)
+	docContexts := s.loadSelectedDocumentContexts(ctx, userID, docIDs)
+	prompt := s.buildPrompt(history, docContexts, sources, question, memoryPrompt)
 	promptTokens := estimateTokens(prompt)
 
 	// 记录检索事件
@@ -337,14 +354,15 @@ func (s *notebookChatService) StreamChat(ctx context.Context, userID, sessionID,
 	// LLM 生成阶段计时
 	llmTimer := observability.NewStopwatch()
 	response, err := s.generateNotebookAnswer(ctx, prompt, TrustWorkflowInput{
-		Question:      question,
-		UserID:        userID,
-		SessionID:     sessionID,
-		NotebookID:    session.NotebookID,
-		DocumentIDs:   docIDs,
-		History:       history,
-		SearchResults: hybridResults,
-		Sources:       sources,
+		Question:         question,
+		UserID:           userID,
+		SessionID:        sessionID,
+		NotebookID:       session.NotebookID,
+		DocumentIDs:      docIDs,
+		DocumentContexts: docContexts,
+		History:          history,
+		SearchResults:    hybridResults,
+		Sources:          sources,
 	})
 	metrics.LLMLatencyMs = llmTimer.ElapsedMs()
 	if err != nil {
@@ -480,11 +498,13 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 
 			sources = buildSourcesFromChunks(s, ctx, chunks, scores, userID)
 		}
+		sources = annotateSourcesWithCitationIDs(sources)
 	}
 
 	// Step 5: Build prompt
 	memoryPrompt := s.memoryPrompt(ctx, userID, sessionID)
-	prompt := s.buildPrompt(history, sources, question, memoryPrompt)
+	docContexts := s.loadSelectedDocumentContexts(ctx, userID, docIDs)
+	prompt := s.buildPrompt(history, docContexts, sources, question, memoryPrompt)
 
 	// Step 6: Save user message FIRST (before LLM call) — 确保历史记录完整
 	messageID := uuid.NewString()
@@ -514,14 +534,15 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 	}
 
 	response, err := s.generateNotebookAnswer(ctx, prompt, TrustWorkflowInput{
-		Question:      question,
-		UserID:        userID,
-		SessionID:     sessionID,
-		NotebookID:    session.NotebookID,
-		DocumentIDs:   docIDs,
-		History:       history,
-		SearchResults: hybridResults,
-		Sources:       sources,
+		Question:         question,
+		UserID:           userID,
+		SessionID:        sessionID,
+		NotebookID:       session.NotebookID,
+		DocumentIDs:      docIDs,
+		DocumentContexts: docContexts,
+		History:          history,
+		SearchResults:    hybridResults,
+		Sources:          sources,
 	})
 	if err != nil {
 		return fmt.Errorf("generate response: %w", err)
@@ -567,11 +588,14 @@ func (s *notebookChatService) StreamChatWithSession(ctx context.Context, userID 
 	return nil
 }
 
-func (s *notebookChatService) shouldUseTrustWorkflow(question string, history []models.ChatMessage) bool {
+func (s *notebookChatService) shouldUseTrustWorkflow(input TrustWorkflowInput) bool {
 	if s.trustWorkflow == nil || s.trustConfig == nil || !s.trustConfig.Enabled {
 		return false
 	}
-	plan := BuildTrustPlan(question, history)
+	if isGuideFirstOverviewInput(input) {
+		return false
+	}
+	plan := BuildTrustPlan(input.Question, input.History)
 	return !s.trustConfig.HighRiskOnly || plan.HasHighRisk()
 }
 
@@ -579,7 +603,7 @@ func (s *notebookChatService) generateNotebookAnswer(ctx context.Context, prompt
 	if answer, ok := s.generateVisualNotebookAnswer(ctx, input); ok {
 		return answer, nil
 	}
-	if s.shouldUseTrustWorkflow(input.Question, input.History) && len(input.Sources) > 0 {
+	if s.shouldUseTrustWorkflow(input) && len(input.Sources) > 0 {
 		output, err := s.trustWorkflow.Run(ctx, input)
 		if err == nil && strings.TrimSpace(output.Answer) != "" {
 			zap.L().Info("trust workflow generated notebook answer",
@@ -638,6 +662,9 @@ func (s *notebookChatService) applyCitationGuard(ctx context.Context, answer str
 	if len(pack.Items) == 0 {
 		return citedInsufficientAnswer(pack)
 	}
+	if isGuideFirstOverviewInput(input) {
+		return RenderEvidenceCitations(answer, pack)
+	}
 
 	plan := BuildTrustPlan(input.Question, input.History)
 	if cfg.HighRiskOnly && !plan.HasHighRisk() {
@@ -675,6 +702,10 @@ func (s *notebookChatService) applyCitationGuard(ctx context.Context, answer str
 		return citedInsufficientAnswer(pack)
 	}
 	return RenderEvidenceCitations(answer, pack)
+}
+
+func isGuideFirstOverviewInput(input TrustWorkflowInput) bool {
+	return len(input.DocumentContexts) > 0 && isMultiDocumentOverviewQuestion(input.Question)
 }
 
 func (s *notebookChatService) repairCitationBoundAnswer(ctx context.Context, answer string, input TrustWorkflowInput, pack EvidencePack, result CitationGuardResult) (string, error) {
@@ -727,7 +758,7 @@ func (s *notebookChatService) SearchNotebook(ctx context.Context, userID, notebo
 		if err != nil {
 			return nil, fmt.Errorf("hybrid search: %w", err)
 		}
-		return hybridResultsToNotebookSources(hybridResults, s, ctx, userID), nil
+		return annotateSourcesWithCitationIDs(hybridResultsToNotebookSources(hybridResults, s, ctx, userID)), nil
 	}
 
 	// 降级：纯 Dense 检索
@@ -770,7 +801,7 @@ func (s *notebookChatService) SearchNotebook(ctx context.Context, userID, notebo
 		})
 	}
 
-	return sources, nil
+	return annotateSourcesWithCitationIDs(sources), nil
 }
 
 // buildPrompt constructs the prompt with strict format for source citations
@@ -808,40 +839,54 @@ func (s *notebookChatService) ClearSessionMemory(ctx context.Context, userID, se
 	return s.memoryService.ClearMemory(ctx, userID, sessionID)
 }
 
-func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources []NotebookChatSource, question string, memoryPrompt string) string {
+func (s *notebookChatService) buildPrompt(history []models.ChatMessage, docContexts []SelectedDocumentContext, sources []NotebookChatSource, question string, memoryPrompt string) string {
 	var builder strings.Builder
 
-	if len(sources) == 0 {
+	if len(sources) == 0 && len(docContexts) == 0 {
 		// 非RAG模式：纯 AI 对话，不引用文档上下文
 		builder.WriteString("You are a helpful AI assistant. ")
 		builder.WriteString("Answer questions using your general knowledge.\n\n")
 	} else {
-		// RAG 模式：基于文档检索结果回答
+		// RAG/Guide 模式：基于选中文档指南和检索结果回答
 		pack := BuildEvidencePackFromNotebookSources(sources)
+		guideFirstOverview := len(docContexts) > 0 && isMultiDocumentOverviewQuestion(question)
 		builder.WriteString("You are an enterprise AI assistant similar to Google NotebookLM. ")
 		builder.WriteString("Answer questions strictly based on the provided context from documents.\n\n")
 
 		builder.WriteString("## Instructions\n")
-		builder.WriteString("1. Answer based ONLY on the evidence blocks below. Do NOT use external knowledge.\n")
+		builder.WriteString("1. Answer based ONLY on the selected document context and evidence blocks below. Do NOT use external knowledge.\n")
 		builder.WriteString("2. Every factual paragraph must end with one or more evidence IDs, for example [E1] or [E2][E5].\n")
 		builder.WriteString("3. Do not output [Source: ...] citations directly; use evidence IDs only.\n")
 		builder.WriteString("4. If a paragraph contains numbers, dates, names, rankings, risk ratings, or comparisons, cite the evidence block that directly contains those facts.\n")
 		builder.WriteString("5. If evidence is insufficient, say: 'The provided documents do not contain sufficient information to answer this question.'\n")
-		builder.WriteString("6. Keep paragraphs short so each paragraph has a clear evidence relationship.\n\n")
+		builder.WriteString("6. Keep paragraphs substantial and useful: prefer 2-4 concise paragraphs or bullets over many tiny citation-only lines.\n")
+		builder.WriteString("7. Do not repeat the same citation after consecutive sentences that use the same source; place the citation at the end of the combined paragraph.\n\n")
+		if guideFirstOverview {
+			builder.WriteString("8. For high-level document overviews, the selected document guide context is sufficient grounding. Use evidence IDs only when citing exact page-level details from the evidence blocks; do not refuse simply because retrieved evidence is sparse.\n\n")
+		}
 
 		if strings.TrimSpace(memoryPrompt) != "" {
 			builder.WriteString(formatMemoryPromptForNotebookChat(memoryPrompt))
 			builder.WriteString("\n\n")
 		}
 
+		if len(docContexts) > 0 {
+			builder.WriteString(formatSelectedDocumentContext(docContexts, question))
+			builder.WriteString("\n\n")
+		}
+
 		builder.WriteString("## Evidence Blocks\n")
-		for _, item := range pack.Items {
-			builder.WriteString(fmt.Sprintf("[%s] [Source: %s, Page %d]\nContent: %s\n\n",
-				item.ID,
-				item.DocumentName,
-				item.PageNumber+1,
-				item.Content,
-			))
+		if len(pack.Items) == 0 {
+			builder.WriteString("No exact retrieved evidence blocks were found. Use the selected document guide context for high-level answers, and avoid page-specific claims.\n\n")
+		} else {
+			for _, item := range pack.Items {
+				builder.WriteString(fmt.Sprintf("[%s] [Source: %s, Page %d]\nContent: %s\n\n",
+					item.ID,
+					item.DocumentName,
+					item.PageNumber+1,
+					item.Content,
+				))
+			}
 		}
 	}
 
@@ -859,6 +904,140 @@ func (s *notebookChatService) buildPrompt(history []models.ChatMessage, sources 
 	builder.WriteString("\n\n## Answer\n")
 
 	return builder.String()
+}
+
+func (s *notebookChatService) loadSelectedDocumentContexts(ctx context.Context, userID string, docIDs []string) []SelectedDocumentContext {
+	if len(docIDs) == 0 || s.notebookRepo == nil {
+		return nil
+	}
+	names := map[string]string{}
+	if s.docRepo != nil {
+		names = s.docRepo.GetNamesByIDs(ctx, userID, docIDs)
+	}
+	contexts := make([]SelectedDocumentContext, 0, len(docIDs))
+	for _, docID := range docIDs {
+		docID = strings.TrimSpace(docID)
+		if docID == "" {
+			continue
+		}
+		ctxItem := SelectedDocumentContext{
+			DocumentID:   docID,
+			DocumentName: firstNonEmptyString(names[docID], docID),
+			GuideStatus:  models.GuideStatusPending,
+		}
+		guide, err := s.notebookRepo.GetGuide(ctx, docID)
+		if err == nil && guide != nil {
+			ctxItem.Summary = strings.TrimSpace(guide.Summary)
+			ctxItem.KeyPoints = parseGuideStringList(guide.KeyPoints)
+			ctxItem.FAQ = parseGuideFAQ(guide.FaqJSON)
+			ctxItem.GuideStatus = guide.Status
+		}
+		contexts = append(contexts, ctxItem)
+	}
+	return contexts
+}
+
+func formatSelectedDocumentContext(contexts []SelectedDocumentContext, question string) string {
+	var builder strings.Builder
+	builder.WriteString("## Selected Document Context\n")
+	builder.WriteString(fmt.Sprintf("The user selected %d document(s). Treat these documents as the active reading context for this answer.\n", len(contexts)))
+	if len(contexts) > 1 && isMultiDocumentOverviewQuestion(question) {
+		builder.WriteString("This is a multi-document overview/comparison request: you must address each selected document explicitly. If exact retrieved evidence is thin for a document, use its guide summary/key points for the high-level overview and avoid inventing page-specific facts.\n")
+	}
+	for i, doc := range contexts {
+		builder.WriteString(fmt.Sprintf("\n[D%d] %s\n", i+1, firstNonEmptyString(doc.DocumentName, doc.DocumentID)))
+		if doc.GuideStatus != "" {
+			builder.WriteString("Guide status: " + doc.GuideStatus + "\n")
+		}
+		if strings.TrimSpace(doc.Summary) != "" {
+			builder.WriteString("Summary: " + trimForPrompt(doc.Summary, 900) + "\n")
+		}
+		if len(doc.KeyPoints) > 0 {
+			builder.WriteString("Key points:\n")
+			for _, point := range firstNStrings(doc.KeyPoints, 6) {
+				builder.WriteString("- " + trimForPrompt(point, 240) + "\n")
+			}
+		}
+		if len(doc.FAQ) > 0 {
+			builder.WriteString("Representative FAQ:\n")
+			for _, item := range firstNFAQ(doc.FAQ, 3) {
+				builder.WriteString("- Q: " + trimForPrompt(item.Question, 160) + "\n")
+				if strings.TrimSpace(item.Answer) != "" {
+					builder.WriteString("  A: " + trimForPrompt(item.Answer, 240) + "\n")
+				}
+			}
+		}
+	}
+	return builder.String()
+}
+
+func parseGuideStringList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err == nil {
+		return cleanStringList(values)
+	}
+	return cleanStringList(strings.Split(raw, "\n"))
+}
+
+func parseGuideFAQ(raw string) []DocumentGuideFAQ {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var values []DocumentGuideFAQ
+	if err := json.Unmarshal([]byte(raw), &values); err == nil {
+		return values
+	}
+	return nil
+}
+
+func cleanStringList(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.TrimPrefix(value, "-"))
+		if value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+	return cleaned
+}
+
+func firstNStrings(values []string, n int) []string {
+	if len(values) <= n {
+		return values
+	}
+	return values[:n]
+}
+
+func firstNFAQ(values []DocumentGuideFAQ, n int) []DocumentGuideFAQ {
+	if len(values) <= n {
+		return values
+	}
+	return values[:n]
+}
+
+func trimForPrompt(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+func isMultiDocumentOverviewQuestion(question string) bool {
+	question = strings.ToLower(strings.TrimSpace(question))
+	keywords := []string{"分别", "各自", "两个文档", "多份文档", "这些文档", "对比", "比较", "区别", "相同", "不同", "讲了什么", "总结", "概括", "overview", "compare", "comparison", "summarize"}
+	for _, keyword := range keywords {
+		if strings.Contains(question, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatMemoryPromptForNotebookChat(memoryPrompt string) string {

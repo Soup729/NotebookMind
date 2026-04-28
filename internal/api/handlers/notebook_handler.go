@@ -23,6 +23,7 @@ type NotebookHandler struct {
 	chatService     service.NotebookChatService
 	artifactService service.NotebookArtifactService
 	exportService   service.NotebookExportService
+	graphService    service.KnowledgeGraphService
 	embedder        embeddings.Embedder
 }
 
@@ -32,6 +33,7 @@ func NewNotebookHandler(
 	chatService service.NotebookChatService,
 	artifactService service.NotebookArtifactService,
 	exportService service.NotebookExportService,
+	graphService service.KnowledgeGraphService,
 	embedder embeddings.Embedder,
 ) *NotebookHandler {
 	return &NotebookHandler{
@@ -39,6 +41,7 @@ func NewNotebookHandler(
 		chatService:     chatService,
 		artifactService: artifactService,
 		exportService:   exportService,
+		graphService:    graphService,
 		embedder:        embedder,
 	}
 }
@@ -205,7 +208,13 @@ func (h *NotebookHandler) DeleteNotebook(c *gin.Context) {
 		return
 	}
 
-	if err := h.notebookService.DeleteNotebook(c.Request.Context(), userID, c.Param("id")); err != nil {
+	notebookID := c.Param("id")
+	if h.graphService != nil {
+		if err := h.graphService.DeleteNotebookGraph(c.Request.Context(), notebookID); err != nil {
+			zap.L().Warn("cleanup notebook graph failed", zap.String("notebook_id", notebookID), zap.Error(err))
+		}
+	}
+	if err := h.notebookService.DeleteNotebook(c.Request.Context(), userID, notebookID); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "notebook not found"})
 			return
@@ -269,6 +278,15 @@ func (h *NotebookHandler) RemoveDocument(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to remove document"})
 		return
+	}
+	if h.graphService != nil {
+		if err := h.graphService.DeleteDocumentGraph(c.Request.Context(), documentID); err != nil {
+			zap.L().Warn("cleanup notebook graph document data failed",
+				zap.String("notebook_id", notebookID),
+				zap.String("document_id", documentID),
+				zap.Error(err),
+			)
+		}
 	}
 
 	c.Status(http.StatusNoContent)
@@ -364,7 +382,7 @@ func (h *NotebookHandler) CreateSession(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"session": session})
+	c.JSON(http.StatusCreated, gin.H{"session": notebookSessionResponse(session)})
 }
 
 func (h *NotebookHandler) ListSessions(c *gin.Context) {
@@ -384,12 +402,7 @@ func (h *NotebookHandler) ListSessions(c *gin.Context) {
 
 	items := make([]gin.H, 0, len(sessions))
 	for _, s := range sessions {
-		items = append(items, gin.H{
-			"id":              s.ID,
-			"title":           s.Title,
-			"last_message_at": s.LastMessageAt,
-			"created_at":      s.CreatedAt,
-		})
+		items = append(items, notebookSessionResponse(&s))
 	}
 
 	c.JSON(http.StatusOK, gin.H{"items": items})
@@ -604,6 +617,49 @@ func (h *NotebookHandler) SearchNotebook(c *gin.Context) {
 	})
 }
 
+func (h *NotebookHandler) GetKnowledgeGraph(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	if h.graphService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge graph service is not configured"})
+		return
+	}
+	graph, err := h.graphService.GetNotebookGraph(c.Request.Context(), userID, c.Param("id"))
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "notebook not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get knowledge graph"})
+		return
+	}
+	c.JSON(http.StatusOK, graph)
+}
+
+func (h *NotebookHandler) ReindexKnowledgeGraph(c *gin.Context) {
+	userID, ok := getUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	if h.graphService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "knowledge graph service is not configured"})
+		return
+	}
+	if err := h.graphService.ReindexNotebookGraph(c.Request.Context(), userID, c.Param("id")); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "notebook not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reindex knowledge graph", "detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "accepted"})
+}
+
 func (h *NotebookHandler) ListArtifacts(c *gin.Context) {
 	userID, ok := getUserID(c)
 	if !ok {
@@ -783,6 +839,25 @@ func notebookResponse(nb *models.Notebook) gin.H {
 		"document_cnt": nb.DocumentCnt,
 		"created_at":   nb.CreatedAt,
 		"updated_at":   nb.UpdatedAt,
+	}
+}
+
+func notebookSessionResponse(session *models.ChatSession) gin.H {
+	if session == nil {
+		return gin.H{}
+	}
+	return gin.H{
+		"id":                   session.ID,
+		"user_id":              session.UserID,
+		"notebook_id":          session.NotebookID,
+		"title":                session.Title,
+		"last_message_at":      session.LastMessageAt,
+		"memory_summary":       session.MemorySummary,
+		"memory_json":          session.MemoryJSON,
+		"memory_message_count": session.MemoryMessageCount,
+		"memory_updated_at":    session.MemoryUpdatedAt,
+		"created_at":           session.CreatedAt,
+		"updated_at":           session.UpdatedAt,
 	}
 }
 

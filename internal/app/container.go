@@ -33,6 +33,7 @@ type Container struct {
 	NotebookChatService     service.NotebookChatService
 	NotebookArtifactService service.NotebookArtifactService
 	NotebookExportService   service.NotebookExportService
+	KnowledgeGraphService   service.KnowledgeGraphService
 	NotebookRepository      repository.NotebookRepository
 
 	// Notes
@@ -81,6 +82,10 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 	if err != nil {
 		return nil, fmt.Errorf("initialize notebook repository: %w", err)
 	}
+	notebookGraphRepo, err := repository.NewNotebookGraphRepository(database.DB)
+	if err != nil {
+		return nil, fmt.Errorf("initialize notebook graph repository: %w", err)
+	}
 
 	llmService, err := service.NewLLMService(ctx, database.DB, &cfg.LLM, &cfg.Milvus)
 	if err != nil {
@@ -126,6 +131,14 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 
 	notebookService := service.NewNotebookService(notebookRepo, notebookVectorStore, embedder, chatLLM, &cfg.LLM, bm25Index)
 	notebookArtifactService := service.NewNotebookArtifactService(notebookRepo, chatLLM)
+	graphSemanticIndex := service.NewNoopKnowledgeGraphSemanticIndex()
+	if cfg.KnowledgeGraph.SemanticIndex.Enabled {
+		zap.L().Warn("knowledge graph semantic index is enabled but Milvus graph index is not implemented yet; using noop index",
+			zap.String("provider", cfg.KnowledgeGraph.SemanticIndex.Provider),
+			zap.String("collection", cfg.KnowledgeGraph.SemanticIndex.Collection),
+		)
+	}
+	knowledgeGraphService := service.NewKnowledgeGraphService(notebookGraphRepo, notebookRepo, embedder, graphSemanticIndex)
 	trustWorkflow := service.NewTrustWorkflow(hybridSearchSvc, chatLLM, cfg.TrustWorkflow.MaxRepairAttempts)
 	sessionMemoryService := service.NewSessionMemoryService(chatRepo, chatLLM)
 	notebookChatService := service.NewNotebookChatService(notebookRepo, documentRepo, notebookVectorStore, chatRepo, chatLLM, embedder, cfg.Chat.RetrievalTopK, hybridSearchSvc, intentRewriteSvc, bm25Index, trustWorkflow, &cfg.TrustWorkflow, &cfg.CitationGuard, llmService, &cfg.Multimodal, sessionMemoryService)
@@ -146,12 +159,12 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 	notebookExportService := service.NewNotebookExportService(notebookRepo, chatLLM, producer)
 
 	authHandler := handlers.NewAuthHandler(authService)
-	documentHandler := handlers.NewDocumentHandler(producer, documentService, notebookService, cfg.Upload)
+	documentHandler := handlers.NewDocumentHandler(producer, documentService, notebookService, knowledgeGraphService, cfg.Upload)
 	chatHandler := handlers.NewChatHandler(chatService, &cfg.LLM)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 	searchHandler := handlers.NewSearchHandler(chatService)
 	usageHandler := handlers.NewUsageHandler(dashboardService)
-	notebookHandler := handlers.NewNotebookHandler(notebookService, notebookChatService, notebookArtifactService, notebookExportService, embedder)
+	notebookHandler := handlers.NewNotebookHandler(notebookService, notebookChatService, notebookArtifactService, notebookExportService, knowledgeGraphService, embedder)
 	noteHandler := handlers.NewNoteHandler(noteService)
 	vqaHandler := handlers.NewVQAHandler(llmService)
 
@@ -169,6 +182,7 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 		NotebookChatService:     notebookChatService,
 		NotebookArtifactService: notebookArtifactService,
 		NotebookExportService:   notebookExportService,
+		KnowledgeGraphService:   knowledgeGraphService,
 		NotebookRepository:      notebookRepo,
 		NoteService:             noteService,
 		NoteRepository:          noteRepo,

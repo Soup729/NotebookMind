@@ -120,14 +120,45 @@ func (r *documentRepository) UpdateProcessingResult(ctx context.Context, documen
 }
 
 func (r *documentRepository) DeleteByID(ctx context.Context, userID, documentID string) error {
-	result := r.db.WithContext(ctx).Where("id = ? AND user_id = ?", documentID, userID).Delete(&models.Document{})
-	if result.Error != nil {
-		return fmt.Errorf("delete document: %w", result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var document models.Document
+		if err := tx.Where("id = ? AND user_id = ?", documentID, userID).First(&document).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return ErrNotFound
+			}
+			return fmt.Errorf("load document: %w", err)
+		}
+
+		if err := tx.Where("document_id = ?", documentID).Delete(&models.DocumentGuide{}).Error; err != nil {
+			return fmt.Errorf("delete document guide: %w", err)
+		}
+
+		var notebookIDs []string
+		if err := tx.Model(&models.NotebookDocument{}).
+			Where("document_id = ?", documentID).
+			Pluck("notebook_id", &notebookIDs).Error; err != nil {
+			return fmt.Errorf("list notebook links: %w", err)
+		}
+
+		if err := tx.Where("document_id = ?", documentID).Delete(&models.NotebookDocument{}).Error; err != nil {
+			return fmt.Errorf("delete notebook document links: %w", err)
+		}
+		for _, notebookID := range notebookIDs {
+			if err := tx.Model(&models.Notebook{}).Where("id = ? AND document_cnt > 0", notebookID).
+				Update("document_cnt", gorm.Expr("document_cnt - 1")).Error; err != nil {
+				return fmt.Errorf("update notebook document count: %w", err)
+			}
+		}
+
+		result := tx.Where("id = ? AND user_id = ?", documentID, userID).Delete(&models.Document{})
+		if result.Error != nil {
+			return fmt.Errorf("delete document: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 func (r *documentRepository) CountByUser(ctx context.Context, userID string) (int64, error) {

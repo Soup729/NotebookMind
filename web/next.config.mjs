@@ -7,15 +7,6 @@ const nextConfig = {
   // ============================================================
   turbopack: {},
 
-  // ============================================================
-  // Server Components 外部包（解决 SSR 兼容性）
-  // ============================================================
-  serverExternalPackages: [
-    'pdfjs-dist',
-    'pdfjs-dist/build/pdf',
-    'pdfjs-dist/build/pdf.worker',
-  ],
-
   // 编译优化
   compiler: {
     removeConsole: process.env.NODE_ENV === 'production',

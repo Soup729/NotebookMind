@@ -30,6 +30,83 @@ ensure_file_from_example() {
   fi
 }
 
+run_checked() {
+  "$@"
+}
+
+docker_container_using_port() {
+  local port="$1"
+  docker ps --format '{{.Names}}|{{.Ports}}' 2>/dev/null | awk -F'|' -v port="$port" '$2 ~ ":" port "->" || $2 ~ "\\." port "->" { print $1; exit }'
+}
+
+assert_docker_port_available() {
+  local port="$1"
+  shift
+  local allowed="$*"
+  local container
+  container="$(docker_container_using_port "$port" || true)"
+  if [[ -n "$container" && " $allowed " != *" $container "* ]]; then
+    echo "Port $port is already used by Docker container '$container'. Stop it first, for example: docker stop $container" >&2
+    exit 1
+  fi
+}
+
+stop_docker_container_using_port() {
+  local port="$1"
+  shift
+  local allowed="$*"
+  local container
+  container="$(docker_container_using_port "$port" || true)"
+  if [[ -n "$container" && " $allowed " != *" $container "* ]]; then
+    echo "Stopping Docker container '$container' using port $port..."
+    run_checked docker stop "$container"
+  fi
+}
+
+stop_local_port_owner() {
+  local port="$1"
+  local name="$2"
+  local pids=""
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  elif command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser "$port/tcp" 2>/dev/null || true)"
+  fi
+  if [[ -z "$pids" ]]; then
+    return
+  fi
+  echo "Stopping $name port $port owner(s): $pids..."
+  # shellcheck disable=SC2086
+  kill $pids >/dev/null 2>&1 || true
+  sleep 1
+  # shellcheck disable=SC2086
+  kill -9 $pids >/dev/null 2>&1 || true
+}
+
+stop_compose_service_if_running() {
+  local service="$1"
+  if docker compose ps -q "$service" >/dev/null 2>&1 && [[ -n "$(docker compose ps -q "$service" 2>/dev/null)" ]]; then
+    echo "Stopping existing Docker service '$service'..."
+    run_checked docker compose stop "$service"
+  fi
+}
+
+assert_local_port_available() {
+  local port="$1"
+  local name="$2"
+  if command -v lsof >/dev/null 2>&1; then
+    local owner
+    owner="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 " pid=" $2}')"
+    if [[ -n "$owner" ]]; then
+      echo "$name port $port is already in use by $owner. Stop it first or use the Docker stack only." >&2
+      exit 1
+    fi
+  elif command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+    echo "$name port $port is already in use. Stop the existing process first or use the Docker stack only." >&2
+    exit 1
+  fi
+}
+
 wait_port() {
   local host="$1"
   local port="$2"
@@ -64,22 +141,43 @@ ensure_file_from_example "web/.env.local" "web/.env.example"
 mkdir -p logs tmp/uploads storage/exports
 
 if [[ "$SKIP_DOCKER" -eq 0 ]]; then
+  run_checked docker version >/dev/null
+  stop_compose_service_if_running worker
+  stop_docker_container_using_port 5432 notebookmind_postgres
+  stop_docker_container_using_port 6380 notebookmind_redis
+  stop_docker_container_using_port 8081
+  if [[ "$SKIP_FRONTEND" -eq 0 ]]; then
+    stop_docker_container_using_port 3000
+  fi
   echo "Starting PostgreSQL and Redis..."
-  docker compose up -d postgres redis
+  run_checked docker compose up -d postgres redis
 fi
 
 if [[ "$INSTALL" -eq 1 ]]; then
   echo "Installing Python export dependencies..."
-  python3 -m pip install -r scripts/requirements-export.txt
+  run_checked python3 -m pip install -r scripts/requirements-export.txt
 fi
 
 if [[ "$SKIP_FRONTEND" -eq 0 && ! -d web/node_modules ]]; then
   echo "Installing frontend dependencies..."
-  (cd web && npm install)
+  if [[ -f web/package-lock.json ]]; then
+    (cd web && run_checked npm ci)
+  else
+    (cd web && run_checked npm install)
+  fi
 fi
 
-wait_port 127.0.0.1 5432 45 || echo "Warning: PostgreSQL port 5432 is not reachable yet."
-wait_port 127.0.0.1 6380 45 || echo "Warning: Redis port 6380 is not reachable yet."
+wait_port 127.0.0.1 5432 45 || { echo "PostgreSQL port 5432 is not reachable. Check Docker and run: docker compose logs postgres" >&2; exit 1; }
+wait_port 127.0.0.1 6380 45 || { echo "Redis port 6380 is not reachable. Check Docker and run: docker compose logs redis" >&2; exit 1; }
+
+stop_local_port_owner 8081 API
+if [[ "$SKIP_FRONTEND" -eq 0 ]]; then
+  stop_local_port_owner 3000 Frontend
+fi
+assert_local_port_available 8081 API
+if [[ "$SKIP_FRONTEND" -eq 0 ]]; then
+  assert_local_port_available 3000 Frontend
+fi
 
 echo "Starting API on http://localhost:8081 ..."
 go run ./cmd/api > logs/dev-api.log 2>&1 &

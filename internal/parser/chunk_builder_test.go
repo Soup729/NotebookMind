@@ -55,3 +55,45 @@ func TestChunkBuilderPersistsVisualRegionMetadata(t *testing.T) {
 		t.Fatalf("expected child visual metadata, got %#v", children[0].Metadata)
 	}
 }
+
+func TestChunkBuilderPropagatesBoundingBoxToChildren(t *testing.T) {
+	builder := NewChunkBuilder(&ParserConfig{
+		ChunkSize:      1000,
+		ChildChunkSize: 300,
+	})
+
+	result := &ParseResult{Blocks: []StructuredBlock{
+		{
+			ID:          "block-1",
+			Type:        BlockTypeText,
+			Content:     "First paragraph about retrieval evidence.",
+			PageNum:     1,
+			BBox:        BoundingBox{X0: 10, Y0: 20, X1: 300, Y1: 60},
+			SectionPath: []string{"Section A"},
+		},
+		{
+			ID:          "block-2",
+			Type:        BlockTypeText,
+			Content:     "Second paragraph that should expand the parent region.",
+			PageNum:     1,
+			BBox:        BoundingBox{X0: 12, Y0: 80, X1: 420, Y1: 130},
+			SectionPath: []string{"Section A"},
+		},
+	}}
+
+	parents, children := builder.BuildChunks(result, "user-1", "doc-1")
+	if len(parents) != 1 || len(children) != 1 {
+		t.Fatalf("expected one parent and one child, got %d/%d", len(parents), len(children))
+	}
+
+	want := BoundingBox{X0: 10, Y0: 20, X1: 420, Y1: 130}
+	if parents[0].BBox != want {
+		t.Fatalf("expected parent union bbox %#v, got %#v", want, parents[0].BBox)
+	}
+	if children[0].BBox != want {
+		t.Fatalf("expected child to inherit parent bbox %#v, got %#v", want, children[0].BBox)
+	}
+	if len(children[0].SourceBlockIDs) != 2 {
+		t.Fatalf("expected child source blocks to be propagated, got %#v", children[0].SourceBlockIDs)
+	}
+}

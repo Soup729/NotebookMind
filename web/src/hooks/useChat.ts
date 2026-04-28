@@ -60,10 +60,16 @@ export function useChat(notebookId: string, sessionId: string | null): UseChatRe
   useEffect(() => {
     if (!sessionId || !notebookId) {
       setMessages([]);
+      setCurrentContent('');
+      setCurrentSources([]);
+      setIsLoadingHistory(false);
       return;
     }
 
     let cancelled = false;
+    setMessages([]);
+    setCurrentContent('');
+    setCurrentSources([]);
     setIsLoadingHistory(true);
 
     const loadMessages = async () => {
@@ -285,12 +291,13 @@ export function useSourceCitation() {
         : [0, 0, 0, 0] as [number, number, number, number];
       // 构建高亮目标
       const highlightTarget: HighlightTarget = {
-        pageNumber: source.page_number,
+        pageNumber: Number(source.page_number || 0) + 1,
         boundingBox,
-        sourceId: source.document_id,
+        sourceId: source.citation_id || `${source.document_id}:${source.page_number}:${source.chunk_index}`,
         documentId: source.document_id,
         documentName: source.document_name,
         content: source.content,
+        chunkType: source.chunk_type,
       };
 
       setMainViewToPdf(source.document_id, highlightTarget);

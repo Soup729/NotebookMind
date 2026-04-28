@@ -35,6 +35,19 @@ const (
 	ArtifactTypeExportDocx     = "export_docx"
 	ArtifactTypeExportPptx     = "export_pptx"
 	ArtifactTypeExportPDF      = "export_pdf"
+
+	GraphStatusEmpty    = "empty"
+	GraphStatusBuilding = "building"
+	GraphStatusReady    = "ready"
+	GraphStatusFailed   = "failed"
+
+	GraphSemanticIndexDisabled = "disabled"
+	GraphSemanticIndexIndexing = "indexing"
+	GraphSemanticIndexReady    = "ready"
+	GraphSemanticIndexFailed   = "failed"
+
+	GraphItemTypeEntity   = "entity"
+	GraphItemTypeRelation = "relation"
 )
 
 type User struct {
@@ -122,6 +135,50 @@ type NotebookArtifact struct {
 	GeneratedAt    *time.Time `json:"generated_at,omitempty"`
 	CreatedAt      time.Time  `gorm:"index" json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// NotebookGraphState stores lightweight notebook-level graph build metadata.
+// The graph assertions themselves live in NotebookGraphItem and can be rebuilt
+// from document chunks when needed.
+type NotebookGraphState struct {
+	NotebookID          string    `gorm:"primaryKey;size:36" json:"notebook_id"`
+	Status              string    `gorm:"index;size:32;not null;default:'empty'" json:"status"`
+	SemanticIndexStatus string    `gorm:"index;size:32;not null;default:'disabled'" json:"semantic_index_status"`
+	Version             int       `gorm:"not null;default:0" json:"version"`
+	EntityCount         int       `gorm:"not null;default:0" json:"entity_count"`
+	RelationCount       int       `gorm:"not null;default:0" json:"relation_count"`
+	LastError           string    `gorm:"type:text" json:"last_error,omitempty"`
+	SemanticIndexError  string    `gorm:"type:text" json:"semantic_index_error,omitempty"`
+	UpdatedAt           time.Time `gorm:"index" json:"updated_at"`
+}
+
+// NotebookGraphItem stores document-level graph assertions. API aggregation
+// turns these assertions into canonical notebook-level nodes and edges.
+type NotebookGraphItem struct {
+	ID             string    `gorm:"primaryKey;size:64" json:"id"`
+	NotebookID     string    `gorm:"index;size:36;not null" json:"notebook_id"`
+	DocumentID     string    `gorm:"index;size:36;not null" json:"document_id"`
+	ItemType       string    `gorm:"index;size:24;not null" json:"item_type"`
+	CanonicalID    string    `gorm:"index;size:255;not null" json:"canonical_id"`
+	EntityName     string    `gorm:"size:255" json:"entity_name,omitempty"`
+	EntityType     string    `gorm:"index;size:64" json:"entity_type,omitempty"`
+	RelationType   string    `gorm:"index;size:64" json:"relation_type,omitempty"`
+	SourceEntityID string    `gorm:"size:255" json:"source_entity_id,omitempty"`
+	TargetEntityID string    `gorm:"size:255" json:"target_entity_id,omitempty"`
+	DisplayLabel   string    `gorm:"size:255" json:"display_label,omitempty"`
+	Description    string    `gorm:"type:text" json:"description,omitempty"`
+	EvidenceText   string    `gorm:"type:text" json:"evidence_text,omitempty"`
+	PageNumber     int64     `gorm:"index" json:"page_number,omitempty"`
+	ChunkID        string    `gorm:"index;size:64" json:"chunk_id,omitempty"`
+	ChunkType      string    `gorm:"index;size:64" json:"chunk_type,omitempty"`
+	BBox           string    `gorm:"type:text" json:"bbox,omitempty"`
+	Confidence     float64   `gorm:"not null;default:0" json:"confidence"`
+	Weight         int       `gorm:"not null;default:1" json:"weight"`
+	VectorText     string    `gorm:"type:text" json:"vector_text,omitempty"`
+	EmbeddingJSON  string    `gorm:"type:text" json:"embedding_json,omitempty"`
+	MetadataJSON   string    `gorm:"type:text" json:"metadata_json,omitempty"`
+	CreatedAt      time.Time `gorm:"index" json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func (d *Document) BeforeSave(_ *gorm.DB) error {

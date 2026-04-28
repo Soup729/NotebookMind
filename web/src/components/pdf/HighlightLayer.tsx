@@ -4,7 +4,7 @@
 
 'use client';
 
-import React, { memo, useMemo } from 'react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 import type { HighlightTarget } from '@/types/api';
 
@@ -29,11 +29,41 @@ export const HighlightLayer = memo(function HighlightLayer({
   onHighlightClick,
   className,
 }: HighlightLayerProps) {
-  // 过滤当前页的高亮
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [textMatchRects, setTextMatchRects] = useState<Record<string, TextMatchRect[]>>({});
   const pageHighlights = useMemo(
     () => highlights.filter((h) => h.pageNumber === pageNumber),
     [highlights, pageNumber]
   );
+  const boxHighlights = useMemo(
+    () => pageHighlights.filter((h) => shouldUseBackendBox(h) && isValidBoundingBox(h.boundingBox, pageWidth, pageHeight)),
+    [pageHeight, pageHighlights, pageWidth]
+  );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const layer = layerRef.current;
+      const page = layer?.closest('.react-pdf__Page');
+      const textLayer = page?.querySelector('.react-pdf__Page__textContent');
+      if (!layer || !textLayer) {
+        setTextMatchRects({});
+        return;
+      }
+
+      const next: Record<string, TextMatchRect[]> = {};
+      for (const highlight of pageHighlights) {
+        if (shouldUseBackendBox(highlight)) {
+          continue;
+        }
+        const rects = findTextMatchRects(textLayer, layer, highlight.content);
+        if (rects.length > 0) {
+          next[highlight.sourceId] = rects;
+        }
+      }
+      setTextMatchRects(next);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [pageHighlights, pageWidth, pageHeight]);
 
   if (pageHighlights.length === 0) return null;
 
@@ -43,9 +73,10 @@ export const HighlightLayer = memo(function HighlightLayer({
         'absolute inset-0 pointer-events-none z-10',
         className
       )}
-      style={{ width: pageWidth, height: pageHeight }}
+      ref={layerRef}
+      style={{ width: '100%', height: '100%' }}
     >
-      {pageHighlights.map((highlight) => {
+      {boxHighlights.map((highlight) => {
         const [x0, y0, x1, y1] = highlight.boundingBox;
         const isActive = activeHighlightId === highlight.sourceId;
 
@@ -96,9 +127,154 @@ export const HighlightLayer = memo(function HighlightLayer({
           </div>
         );
       })}
+      {pageHighlights.flatMap((highlight) => {
+        const rects = textMatchRects[highlight.sourceId] || [];
+        const isActive = activeHighlightId === highlight.sourceId;
+        return rects.map((rect, index) => (
+          <div
+            key={`${highlight.sourceId}-text-${index}`}
+            style={{
+              position: 'absolute',
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height,
+              backgroundColor: isActive
+                ? 'rgba(253, 224, 71, 0.55)'
+                : 'rgba(254, 240, 138, 0.45)',
+              borderRadius: '2px',
+              pointerEvents: 'auto',
+              cursor: 'pointer',
+              boxShadow: isActive
+                ? '0 0 0 2px rgba(250, 204, 21, 0.45)'
+                : '0 0 0 1px rgba(250, 204, 21, 0.25)',
+            }}
+            onClick={() => onHighlightClick?.(highlight)}
+            title={highlight.content?.slice(0, 100)}
+          />
+        ));
+      })}
     </div>
   );
 });
+
+interface TextMatchRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+function shouldUseBackendBox(highlight: HighlightTarget): boolean {
+  const type = (highlight.chunkType || '').toLowerCase();
+  return type === 'image';
+}
+
+function isValidBoundingBox(
+  box: HighlightTarget['boundingBox'] | null | undefined,
+  pageWidth: number,
+  pageHeight: number
+): box is HighlightTarget['boundingBox'] {
+  if (!box || box.length !== 4 || pageWidth <= 0 || pageHeight <= 0) {
+    return false;
+  }
+  const [x0, y0, x1, y1] = box;
+  if (![x0, y0, x1, y1].every(Number.isFinite)) {
+    return false;
+  }
+  if (x1 <= x0 || y1 <= y0) {
+    return false;
+  }
+  if (x0 === 0 && y0 === 0 && x1 === 0 && y1 === 0) {
+    return false;
+  }
+  return x1 > 0 && y1 > 0 && x0 < pageWidth && y0 < pageHeight;
+}
+
+function findTextMatchRects(textLayer: Element, layer: HTMLElement, content: string): TextMatchRect[] {
+  const words = tokenize(content);
+  if (words.length < 3) {
+    return [];
+  }
+
+  const spans = Array.from(textLayer.querySelectorAll('span')) as HTMLElement[];
+  const pageWords: Array<{ word: string; span: HTMLElement }> = [];
+  for (const span of spans) {
+    for (const word of tokenize(span.textContent || '')) {
+      pageWords.push({ word, span });
+    }
+  }
+  if (pageWords.length === 0) {
+    return [];
+  }
+
+  const windows = candidateWordWindows(words);
+  for (const candidate of windows) {
+    const start = findWordSequence(pageWords, candidate);
+    if (start < 0) {
+      continue;
+    }
+    const matchedSpans = new Set<HTMLElement>();
+    for (let i = start; i < start + candidate.length; i++) {
+      matchedSpans.add(pageWords[i].span);
+    }
+    const layerRect = layer.getBoundingClientRect();
+    return Array.from(matchedSpans)
+      .slice(0, 8)
+      .map((span) => {
+        const rect = span.getBoundingClientRect();
+        return {
+          left: rect.left - layerRect.left,
+          top: rect.top - layerRect.top,
+          width: rect.width,
+          height: rect.height,
+        };
+      })
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+  }
+  return [];
+}
+
+function candidateWordWindows(words: string[]): string[][] {
+  const windows: string[][] = [];
+  const sizes = [10, 8, 6, 4];
+  const starts = [0, Math.floor(words.length * 0.25), Math.floor(words.length * 0.5)];
+  for (const size of sizes) {
+    if (words.length < size) {
+      continue;
+    }
+    for (const start of starts) {
+      const safeStart = Math.min(start, words.length - size);
+      const candidate = words.slice(safeStart, safeStart + size);
+      if (candidate.length === size) {
+        windows.push(candidate);
+      }
+    }
+  }
+  return windows;
+}
+
+function findWordSequence(pageWords: Array<{ word: string; span: HTMLElement }>, candidate: string[]): number {
+  outer:
+  for (let i = 0; i <= pageWords.length - candidate.length; i++) {
+    for (let j = 0; j < candidate.length; j++) {
+      if (pageWords[i + j].word !== candidate[j]) {
+        continue outer;
+      }
+    }
+    return i;
+  }
+  return -1;
+}
+
+function tokenize(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 2);
+}
 
 // ============================================================
 // 高亮标记组件（用于列表展示）

@@ -21,11 +21,11 @@ func TestCitationGuardDefaults(t *testing.T) {
 	if !cfg.CitationGuard.Enabled {
 		t.Fatalf("expected citation guard to default enabled")
 	}
-	if !cfg.CitationGuard.RepairEnabled {
-		t.Fatalf("expected citation guard repair to default enabled")
+	if cfg.CitationGuard.RepairEnabled {
+		t.Fatalf("expected citation guard repair to default disabled for latency")
 	}
-	if cfg.CitationGuard.MaxRepairAttempts != 1 {
-		t.Fatalf("expected one repair attempt, got %d", cfg.CitationGuard.MaxRepairAttempts)
+	if cfg.CitationGuard.MaxRepairAttempts != 0 {
+		t.Fatalf("expected zero repair attempts by default, got %d", cfg.CitationGuard.MaxRepairAttempts)
 	}
 	if cfg.CitationGuard.MinCitationCoverage != 0.8 {
 		t.Fatalf("expected min citation coverage 0.8, got %f", cfg.CitationGuard.MinCitationCoverage)

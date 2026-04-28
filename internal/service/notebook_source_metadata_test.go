@@ -5,10 +5,17 @@ import (
 	"strings"
 	"testing"
 
+	"NotebookAI/internal/configs"
 	"NotebookAI/internal/models"
 )
 
 type fakeDocumentRepoForSources struct{}
+
+type fakeTrustWorkflow struct{}
+
+func (f *fakeTrustWorkflow) Run(context.Context, TrustWorkflowInput) (TrustWorkflowOutput, error) {
+	return TrustWorkflowOutput{}, nil
+}
 
 func (f *fakeDocumentRepoForSources) Create(context.Context, *models.Document) error { return nil }
 func (f *fakeDocumentRepoForSources) GetByID(context.Context, string, string) (*models.Document, error) {
@@ -73,7 +80,7 @@ func TestHybridResultsToNotebookSourcesPreservesStructuredMetadata(t *testing.T)
 
 func TestNotebookPromptUsesCanonicalCitationTokensInRetrievedContext(t *testing.T) {
 	svc := &notebookChatService{}
-	prompt := svc.buildPrompt(nil, []NotebookChatSource{
+	prompt := svc.buildPrompt(nil, nil, []NotebookChatSource{
 		{
 			DocumentName: "Financial_Statements_2024.pdf",
 			PageNumber:   0,
@@ -94,7 +101,7 @@ func TestNotebookPromptUsesCanonicalCitationTokensInRetrievedContext(t *testing.
 
 func TestNotebookPromptIncludesSessionMemoryBeforeEvidence(t *testing.T) {
 	svc := &notebookChatService{}
-	prompt := svc.buildPrompt(nil, []NotebookChatSource{
+	prompt := svc.buildPrompt(nil, nil, []NotebookChatSource{
 		{
 			DocumentName: "Annual_Report_2024.pdf",
 			PageNumber:   0,
@@ -109,5 +116,124 @@ func TestNotebookPromptIncludesSessionMemoryBeforeEvidence(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "The user is preparing a board briefing.") {
 		t.Fatalf("expected memory content in prompt, got:\n%s", prompt)
+	}
+}
+
+func TestNotebookPromptIncludesSelectedDocumentGuidesBeforeEvidence(t *testing.T) {
+	svc := &notebookChatService{}
+	prompt := svc.buildPrompt(nil, []SelectedDocumentContext{
+		{
+			DocumentID:   "doc-1",
+			DocumentName: "Tutorial 1_final.pdf",
+			Summary:      "Covers Arduino Uno, DHT11 sensing, LCD display, and serial output.",
+			KeyPoints:    []string{"Arduino Uno sensing workflow", "DHT11 humidity and temperature reading"},
+			GuideStatus:  models.GuideStatusCompleted,
+		},
+		{
+			DocumentID:   "doc-2",
+			DocumentName: "Tutorial 2_final.pdf",
+			Summary:      "Covers robot motor control and ultrasonic obstacle avoidance.",
+			KeyPoints:    []string{"Motor driver control", "Ultrasonic distance measurement"},
+			GuideStatus:  models.GuideStatusCompleted,
+		},
+	}, []NotebookChatSource{
+		{
+			DocumentID:   "doc-1",
+			DocumentName: "Tutorial 1_final.pdf",
+			PageNumber:   6,
+			Content:      "The code initializes the DHT11 sensor and LCD.",
+		},
+	}, "这两个文档分别讲了什么内容？", "")
+
+	guideIndex := strings.Index(prompt, "## Selected Document Context")
+	evidenceIndex := strings.Index(prompt, "## Evidence Blocks")
+	if guideIndex < 0 || evidenceIndex < 0 || guideIndex > evidenceIndex {
+		t.Fatalf("expected selected document context before evidence, got:\n%s", prompt)
+	}
+	for _, expected := range []string{
+		"Tutorial 1_final.pdf",
+		"Tutorial 2_final.pdf",
+		"Covers Arduino Uno",
+		"Covers robot motor control",
+		"must address each selected document",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("expected prompt to contain %q, got:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestNotebookPromptUsesSelectedGuidesEvenWhenEvidenceIsEmpty(t *testing.T) {
+	svc := &notebookChatService{}
+	prompt := svc.buildPrompt(nil, []SelectedDocumentContext{
+		{
+			DocumentID:   "doc-1",
+			DocumentName: "Tutorial 2_final.pdf",
+			Summary:      "Explains robot motor control and obstacle avoidance.",
+			GuideStatus:  models.GuideStatusCompleted,
+		},
+	}, nil, "这个文档讲了什么？", "")
+
+	if strings.Contains(prompt, "Answer questions using your general knowledge") {
+		t.Fatalf("selected document guide context should not fall back to general knowledge prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Tutorial 2_final.pdf") || !strings.Contains(prompt, "obstacle avoidance") {
+		t.Fatalf("expected selected guide context in prompt, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "No exact retrieved evidence blocks were found") {
+		t.Fatalf("expected empty evidence notice, got:\n%s", prompt)
+	}
+}
+
+func TestGuideFirstOverviewBypassesEvidenceOnlyTrustWorkflow(t *testing.T) {
+	svc := &notebookChatService{
+		trustWorkflow: &fakeTrustWorkflow{},
+		trustConfig: &configs.TrustWorkflowConfig{
+			Enabled:      true,
+			HighRiskOnly: true,
+		},
+	}
+	input := TrustWorkflowInput{
+		Question: "这两个文档分别讲了什么内容",
+		DocumentContexts: []SelectedDocumentContext{
+			{DocumentID: "doc-1", DocumentName: "Tutorial 1.pdf", Summary: "Arduino sensing tutorial."},
+			{DocumentID: "doc-2", DocumentName: "Tutorial 2.pdf", Summary: "Robot control tutorial."},
+		},
+		Sources: []NotebookChatSource{{DocumentID: "doc-1", DocumentName: "Tutorial 1.pdf", PageNumber: 7, Content: "DHT11 sensor code."}},
+	}
+
+	if svc.shouldUseTrustWorkflow(input) {
+		t.Fatal("guide-first multi-document overview should bypass evidence-only trust workflow")
+	}
+}
+
+func TestCitationGuardKeepsGuideFirstOverviewInsteadOfFailingClosed(t *testing.T) {
+	svc := &notebookChatService{
+		citationGuard: &configs.CitationGuardConfig{
+			Enabled:                   true,
+			RequireParagraphCitations: true,
+			ValidateNumbers:           true,
+			ValidateEntityPhrases:     true,
+			MinCitationCoverage:       0.8,
+			FailClosedForHighRisk:     true,
+		},
+	}
+	input := TrustWorkflowInput{
+		Question: "这两个文档分别讲了什么内容",
+		DocumentContexts: []SelectedDocumentContext{
+			{DocumentID: "doc-1", DocumentName: "Tutorial 1.pdf", Summary: "Arduino sensing tutorial."},
+			{DocumentID: "doc-2", DocumentName: "Tutorial 2.pdf", Summary: "Robot control tutorial."},
+		},
+		Sources: []NotebookChatSource{{DocumentID: "doc-1", DocumentName: "Tutorial 1.pdf", PageNumber: 7, Content: "DHT11 sensor code."}},
+	}
+	answer := "Tutorial 1 主要讲 Arduino 传感器训练。\n\nTutorial 2 主要讲机器人控制训练。"
+
+	rendered := svc.applyCitationGuard(context.Background(), answer, input)
+
+	if strings.Contains(rendered, "do not contain sufficient information") {
+		t.Fatalf("guide overview should not be rewritten to insufficient answer: %s", rendered)
+	}
+	if !strings.Contains(rendered, "Tutorial 2 主要讲机器人控制训练") {
+		t.Fatalf("expected original guide-grounded overview to remain, got: %s", rendered)
 	}
 }

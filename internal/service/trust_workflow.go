@@ -15,14 +15,15 @@ type TrustWorkflow interface {
 }
 
 type TrustWorkflowInput struct {
-	Question      string
-	UserID        string
-	SessionID     string
-	NotebookID    string
-	DocumentIDs   []string
-	History       []models.ChatMessage
-	SearchResults []HybridResult
-	Sources       []NotebookChatSource
+	Question         string
+	UserID           string
+	SessionID        string
+	NotebookID       string
+	DocumentIDs      []string
+	DocumentContexts []SelectedDocumentContext
+	History          []models.ChatMessage
+	SearchResults    []HybridResult
+	Sources          []NotebookChatSource
 }
 
 type TrustWorkflowOutput struct {

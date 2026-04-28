@@ -15,10 +15,11 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 python3-pip && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-pip && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/api /app/api
 COPY --from=builder /out/worker /app/worker
+COPY --from=builder /go/pkg/mod/github.com/yanyiwu/gojieba@v1.4.7/deps/cppjieba/dict /go/pkg/mod/github.com/yanyiwu/gojieba@v1.4.7/deps/cppjieba/dict
 COPY configs /app/configs
 COPY scripts/render_export.py /app/scripts/render_export.py
 COPY scripts/requirements-export.txt /app/scripts/requirements-export.txt

@@ -36,10 +36,10 @@ func TestRenderEvidenceCitationsConvertsIDsToCanonicalSources(t *testing.T) {
 	answer := "Revenue was $1.85B. [E1]\n\nRisk was High. [E2]"
 	rendered := RenderEvidenceCitations(answer, pack)
 
-	if !strings.Contains(rendered, "[Source: Annual.pdf, Page 1]") {
+	if !strings.Contains(rendered, "[Source: Annual.pdf, Page 1, E1]") {
 		t.Fatalf("missing Annual citation: %s", rendered)
 	}
-	if !strings.Contains(rendered, "[Source: Risk.pdf, Page 4]") {
+	if !strings.Contains(rendered, "[Source: Risk.pdf, Page 4, E2]") {
 		t.Fatalf("missing Risk citation: %s", rendered)
 	}
 	if strings.Contains(rendered, "[E1]") || strings.Contains(rendered, "[E2]") {
@@ -149,8 +149,66 @@ func TestCitationGuardRendersValidAnswer(t *testing.T) {
 		t.Fatalf("expected valid answer: %#v", result.Issues)
 	}
 	rendered := RenderEvidenceCitations("Revenue was $1.85B. [E1]", pack)
-	if rendered != "Revenue was $1.85B. [Source: Annual.pdf, Page 1]" {
+	if rendered != "Revenue was $1.85B. [Source: Annual.pdf, Page 1, E1]" {
 		t.Fatalf("unexpected rendered answer: %s", rendered)
+	}
+}
+
+func TestRenderEvidenceCitationsCollapsesConsecutiveSameSourcePage(t *testing.T) {
+	pack := EvidencePack{Items: []EvidenceItem{{ID: "E1", DocumentName: "Annual.pdf", PageNumber: 0, Content: "Revenue was $1.85B."}}}
+
+	rendered := RenderEvidenceCitations("Revenue grew year over year. [E1]\n\nThe increase was driven by enterprise demand. [E1]", pack)
+
+	if strings.Contains(rendered, "Revenue grew year over year. [Source: Annual.pdf, Page 1, E1]") {
+		t.Fatalf("expected first duplicate citation to be collapsed: %s", rendered)
+	}
+	if !strings.Contains(rendered, "The increase was driven by enterprise demand. [Source: Annual.pdf, Page 1, E1]") {
+		t.Fatalf("expected final paragraph in run to keep citation: %s", rendered)
+	}
+}
+
+func TestRenderEvidenceCitationsKeepsDifferentConsecutiveSources(t *testing.T) {
+	pack := EvidencePack{Items: []EvidenceItem{
+		{ID: "E1", DocumentName: "Annual.pdf", PageNumber: 0, Content: "Revenue was $1.85B."},
+		{ID: "E2", DocumentName: "Annual.pdf", PageNumber: 1, Content: "Margin was 18%."},
+	}}
+
+	rendered := RenderEvidenceCitations("Revenue grew. [E1]\n\nMargin improved. [E2]", pack)
+
+	if !strings.Contains(rendered, "[Source: Annual.pdf, Page 1, E1]") || !strings.Contains(rendered, "[Source: Annual.pdf, Page 2, E2]") {
+		t.Fatalf("different source pages should both remain: %s", rendered)
+	}
+}
+
+func TestRenderEvidenceCitationsCollapsesConsecutiveSameDocumentPageWithDifferentEvidenceIDs(t *testing.T) {
+	pack := EvidencePack{Items: []EvidenceItem{
+		{ID: "E1", DocumentName: "Tutorial.pdf", PageNumber: 6, Content: "The tutorial initializes the DHT11 sensor."},
+		{ID: "E2", DocumentName: "Tutorial.pdf", PageNumber: 6, Content: "The tutorial also initializes the LCD display."},
+	}}
+
+	rendered := RenderEvidenceCitations("The tutorial initializes the DHT11 sensor. [E1]\n\nIt also initializes the LCD display. [E2]", pack)
+
+	if strings.Contains(rendered, "DHT11 sensor. [Source: Tutorial.pdf, Page 7, E1]") {
+		t.Fatalf("expected earlier same-page citation to collapse even with different evidence id: %s", rendered)
+	}
+	if !strings.Contains(rendered, "LCD display. [Source: Tutorial.pdf, Page 7, E2]") {
+		t.Fatalf("expected final same-page citation to remain: %s", rendered)
+	}
+}
+
+func TestAnnotateSourcesWithCitationIDsMatchesEvidencePackIDs(t *testing.T) {
+	sources := []NotebookChatSource{
+		{DocumentID: "doc-1", DocumentName: "Annual.pdf", PageNumber: 0, ChunkIndex: 2, Content: "Revenue was $1.85B."},
+		{DocumentID: "doc-1", DocumentName: "Annual.pdf", PageNumber: 1, ChunkIndex: 3, Content: "Operating margin was 18%."},
+	}
+
+	annotated := annotateSourcesWithCitationIDs(sources)
+
+	if annotated[0].CitationID != "E1" || annotated[1].CitationID != "E2" {
+		t.Fatalf("expected citation IDs to match evidence pack order, got %#v", annotated)
+	}
+	if sources[0].CitationID != "" {
+		t.Fatalf("annotateSourcesWithCitationIDs should not mutate caller slice")
 	}
 }
 

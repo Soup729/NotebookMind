@@ -15,7 +15,20 @@ import { SourceList } from './SourceBadge';
 import type { ChatMessage as ChatMessageType, ChatSource } from '@/types/api';
 
 // 来源正则表达式
-const SOURCE_PATTERN = /\[Source:\s*([^,\]]+)(?:,\s*Page\s*(\d+))?\]/gi;
+const SOURCE_PATTERN = /\[Source:\s*([^,\]]+)(?:,\s*Page\s*(\d+))?(?:,\s*(E\d+))?\]/gi;
+
+function sourceDocumentName(source: Partial<ChatSource> | null | undefined): string {
+  const maybeSource = source as (Partial<ChatSource> & {
+    file_name?: unknown;
+    documentName?: unknown;
+  }) | null | undefined;
+  const value =
+    maybeSource?.document_name ??
+    maybeSource?.file_name ??
+    maybeSource?.documentName ??
+    '';
+  return String(value || '').trim();
+}
 
 interface ParsedContent {
   type: 'text' | 'source';
@@ -23,8 +36,14 @@ interface ParsedContent {
   source?: {
     documentName: string;
     pageNumber?: number;
+    citationId?: string;
     source: ChatSource;
+    highlightText?: string;
   };
+}
+
+function sourceKeyByNamePage(documentName: string, pageNumber?: number): string {
+  return `${documentName.toLowerCase()}:${pageNumber || 0}`;
 }
 
 /**
@@ -36,10 +55,24 @@ function parseMessageContent(
 ): ParsedContent[] {
   if (!content) return [];
 
-  // 创建文档名到来源的映射
-  const sourceMap = new Map<string, ChatSource>();
+  const sourceByCitation = new Map<string, ChatSource>();
+  const sourceByNamePage = new Map<string, ChatSource>();
+  const sourceByName = new Map<string, ChatSource>();
   sources.forEach((source) => {
-    sourceMap.set(source.document_name.toLowerCase(), source);
+    const documentName = sourceDocumentName(source);
+    if (source.citation_id) {
+      sourceByCitation.set(source.citation_id.toUpperCase(), source);
+    }
+    if (documentName) {
+      const displayPage = Number(source.page_number || 0) + 1;
+      const namePageKey = sourceKeyByNamePage(documentName, displayPage);
+      if (!sourceByNamePage.has(namePageKey)) {
+        sourceByNamePage.set(namePageKey, source);
+      }
+      if (!sourceByName.has(documentName.toLowerCase())) {
+        sourceByName.set(documentName.toLowerCase(), source);
+      }
+    }
   });
 
   const parts: ParsedContent[] = [];
@@ -60,7 +93,17 @@ function parseMessageContent(
 
     const documentName = match[1].trim();
     const pageNumber = match[2] ? parseInt(match[2], 10) : undefined;
-    const matchedSource = sourceMap.get(documentName.toLowerCase());
+    const citationId = match[3]?.toUpperCase();
+    const matchedSource =
+      (citationId ? sourceByCitation.get(citationId) : undefined) ||
+      sourceByNamePage.get(sourceKeyByNamePage(documentName, pageNumber)) ||
+      sourceByName.get(documentName.toLowerCase());
+
+    const previousText = content.slice(lastIndex, match.index);
+    const claimText = extractCitationClaim(previousText || parts[parts.length - 1]?.content || '');
+    const highlightText = matchedSource
+      ? bestEvidenceSentence(matchedSource.content, claimText)
+      : '';
 
     // 添加来源标记
     parts.push({
@@ -69,9 +112,12 @@ function parseMessageContent(
       source: {
         documentName,
         pageNumber,
+        citationId,
+        highlightText,
         source: matchedSource || {
           document_id: '',
           document_name: documentName,
+          citation_id: citationId,
           page_number: pageNumber || 0,
           chunk_index: 0,
           content: '',
@@ -117,8 +163,8 @@ export const ChatMessage = memo(function ChatMessage({
 
   // 处理来源点击
   const handleSourceClick = useCallback(
-    (source: ChatSource) => {
-      onSourceClick?.(source);
+    (source: ChatSource, highlightText?: string) => {
+      onSourceClick?.(highlightText ? { ...source, content: highlightText } : source);
     },
     [onSourceClick]
   );
@@ -185,7 +231,7 @@ export const ChatMessage = memo(function ChatMessage({
                           'hover:bg-yellow-200/80 cursor-pointer transition-colors',
                           onSourceClick && 'cursor-pointer'
                         )}
-                        onClick={() => handleSourceClick(part.source!.source)}
+                        onClick={() => handleSourceClick(part.source!.source, part.source!.highlightText)}
                         title={part.source.source.content?.slice(0, 100)}
                       >
                         <FileTextIcon className="w-3 h-3" />
@@ -227,7 +273,7 @@ export const ChatMessage = memo(function ChatMessage({
         {!isUser && message.sources && message.sources.length > 0 && (
           <SourceList
             sources={message.sources}
-            onSourceClick={handleSourceClick}
+            onSourceClick={(source) => handleSourceClick({ ...source, content: '' })}
             className="mt-1"
           />
         )}
@@ -272,6 +318,78 @@ function FileTextIcon({ className }: { className?: string }) {
       <line x1="10" y1="9" x2="8" y2="9" />
     </svg>
   );
+}
+
+function extractCitationClaim(text: string): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (!cleaned) {
+    return '';
+  }
+  const parts = cleaned.split(/(?<=[。.!?；;])\s+/);
+  return parts[parts.length - 1] || cleaned;
+}
+
+function bestEvidenceSentence(evidence: string, claim: string): string {
+  const sentences = evidence
+    .replace(/\s+/g, ' ')
+    .split(/(?<=[。.!?；;])\s+|(?<=\|)\s*/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 20)
+    .filter((item) => !looksLikePageHeader(item));
+  if (sentences.length === 0) {
+    return evidence;
+  }
+  const claimTokens = significantTokens(claim);
+  if (claimTokens.length === 0) {
+    return sentences[0];
+  }
+  let best = sentences[0];
+  let bestScore = -1;
+  for (const sentence of sentences) {
+    const sentenceTokens = new Set(significantTokens(sentence));
+    let overlap = 0;
+    for (const token of claimTokens) {
+      if (sentenceTokens.has(token)) {
+        overlap++;
+      }
+    }
+    const score = overlap / Math.max(1, Math.sqrt(sentenceTokens.size));
+    if (score > bestScore) {
+      bestScore = score;
+      best = sentence;
+    }
+  }
+  if (bestScore <= 0) {
+    return sentences[0];
+  }
+  return best;
+}
+
+function significantTokens(text: string): string[] {
+  const stop = new Set([
+    'the', 'and', 'for', 'with', 'that', 'this', 'from', 'were', 'was', 'are', 'is', 'in', 'on', 'of', 'to', 'a', 'an',
+    '根据', '显示', '其中', '这个', '这些', '以及', '因此', '可以', '进行',
+  ]);
+  return text
+    .toLowerCase()
+    .replace(/([a-z]+)(\d+)/gi, '$1 $2')
+    .replace(/(\d+)([a-z]+)/gi, '$1 $2')
+    .replace(/([\p{Script=Han}])([a-z0-9]+)/giu, '$1 $2')
+    .replace(/([a-z0-9]+)([\p{Script=Han}])/giu, '$1 $2')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && !stop.has(token));
+}
+
+function looksLikePageHeader(text: string): boolean {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return true;
+  if (/^-{8,}$/.test(normalized)) return true;
+  if (/tutorial\s+\d/i.test(normalized) && normalized.length < 160) return true;
+  if (/advanced robot sensing/i.test(normalized) && normalized.length < 220) return true;
+  if (/^page\s+\d+/i.test(normalized)) return true;
+  return false;
 }
 
 function PinIcon({ className }: { className?: string }) {

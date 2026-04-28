@@ -115,6 +115,20 @@ multimodal:
   max_visual_evidence: 2
   min_visual_score: 0.35
 
+# ===== Notebook 知识图谱 =====
+knowledge_graph:
+  enabled: true
+  extraction:
+    max_chunks_per_document: 14
+    max_entities_per_chunk: 5
+    relation_strategy: "conservative"
+  semantic_index:
+    enabled: false             # 当前默认使用 Postgres 图谱主库；后续启用 Milvus 语义索引
+    provider: "noop"           # "noop" | "milvus"
+    collection: "notebook_graph_vectors"
+    async: true
+    fail_open: true
+
 # ===== Phase 2: 混合检索配置 =====
 hybrid_search:
   enabled: true               # 是否启用混合检索
@@ -145,8 +159,8 @@ trust_workflow:
 citation_guard:
   enabled: true
   high_risk_only: false
-  repair_enabled: true
-  max_repair_attempts: 1
+  repair_enabled: false
+  max_repair_attempts: 0
   require_paragraph_citations: true
   validate_numbers: true
   validate_entity_phrases: true

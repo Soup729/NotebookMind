@@ -183,6 +183,7 @@ export interface SessionMemory {
 export interface ChatSource {
   document_id: string;
   document_name: string;
+  citation_id?: string;
   page_number: number;
   chunk_index: number;
   content: string;
@@ -307,6 +308,62 @@ export interface SearchResponse {
 }
 
 // ============================================================
+// 知识图谱 (Knowledge Graph)
+// ============================================================
+
+export interface KnowledgeGraphDocument {
+  id: string;
+  name: string;
+}
+
+export interface KnowledgeGraphEvidence {
+  document_id: string;
+  document_name?: string;
+  page?: number;
+  text: string;
+  chunk_id?: string;
+  chunk_type?: string;
+  bbox?: string;
+}
+
+export interface KnowledgeGraphNode {
+  id: string;
+  label: string;
+  type: string;
+  size: number;
+  confidence: number;
+  description?: string;
+  documents: KnowledgeGraphDocument[];
+  evidence: KnowledgeGraphEvidence[];
+}
+
+export interface KnowledgeGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  label: string;
+  weight: number;
+  confidence: number;
+  documents: KnowledgeGraphDocument[];
+  evidence: KnowledgeGraphEvidence[];
+}
+
+export interface KnowledgeGraphResponse {
+  status: 'empty' | 'building' | 'ready' | 'failed';
+  semantic_index_status?: 'disabled' | 'indexing' | 'ready' | 'failed';
+  version: number;
+  nodes: KnowledgeGraphNode[];
+  edges: KnowledgeGraphEdge[];
+  stats: {
+    entities: number;
+    relations: number;
+    documents: number;
+  };
+  error?: string;
+  semantic_index_error?: string;
+}
+
+// ============================================================
 // 高亮目标 (Highlight Target)
 // ============================================================
 
@@ -317,6 +374,7 @@ export interface HighlightTarget {
   documentId: string;
   documentName: string;
   content: string;
+  chunkType?: string;
 }
 
 // ============================================================

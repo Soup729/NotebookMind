@@ -55,6 +55,7 @@ func New(
 		protected.GET("/documents", documentHandler.ListDocuments)
 		protected.POST("/documents", documentHandler.UploadDocument)
 		protected.GET("/documents/:id", documentHandler.GetDocument)
+		protected.GET("/documents/:id/pdf", documentHandler.GetDocumentPDF)
 		protected.DELETE("/documents/:id", documentHandler.DeleteDocument)
 
 		protected.GET("/chat/sessions", chatHandler.ListSessions)
@@ -96,6 +97,10 @@ func New(
 
 		// Notebook Search
 		protected.POST("/notebooks/:id/search", notebookHandler.SearchNotebook)
+
+		// Notebook Knowledge Graph
+		protected.GET("/notebooks/:id/graph", notebookHandler.GetKnowledgeGraph)
+		protected.POST("/notebooks/:id/graph/reindex", notebookHandler.ReindexKnowledgeGraph)
 
 		// Notebook Research Artifacts
 		protected.GET("/notebooks/:id/artifacts", notebookHandler.ListArtifacts)

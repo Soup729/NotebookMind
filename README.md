@@ -2,8 +2,8 @@
 
 NotebookMind 是一个类 NotebookLM 的文档研究工作台。项目支持 PDF 上传解析、Notebook 级多文档问答、引用溯源、PDF 高亮、研究笔记、研究产物生成，以及 Markdown / 思维导图 / Word / PPT / PDF 导出。
 
-当前重点不是做一个普通聊天机器人，而是让用户围绕一组文档完成持续研究：上传资料、提问、追溯来源、整理笔记、生成 briefing / FAQ / 时间线 / 学习材料和可编辑导出物。
-![alt text](image.png)
+本项目的目的不是做一个普通聊天机器人，而是让用户围绕一组文档完成持续研究：上传资料、提问、追溯来源、整理笔记、生成 briefing / FAQ / 时间线 / 学习材料和可编辑导出物。
+
 ## 功能特性
 
 - **文档理解**：PDF 解析、OCR 降级、表格/图片/图表块识别、页码与 bbox 元数据保留。
@@ -18,17 +18,18 @@ NotebookMind 是一个类 NotebookLM 的文档研究工作台。项目支持 PDF
 
 ## 当前效果
 
-最近一次保留的离线评测结果：
+当前默认链路保留的是“轻量 Citation Guard + Hybrid RAG + 多轮上下文增强”方案。最近一次作为有效基线保留的离线评测结果：
 
 | 指标 | 结果 |
 | --- | --- |
-| 综合评分 | 85.5 / 100 |
-| Citation Precision | 0.73 |
-| 幻觉率 | 30.0% |
-| Recall@K | 88.6% |
-| P95 延迟 | 5775ms |
+| 综合评分 | 87.8 / 100 |
+| Citation Precision | 0.78 |
+| 幻觉率 | 20.0% |
+| Recall@K | 94.7% |
+| 平均延迟 | 7938ms |
+| P95 延迟 | 13200ms |
 
-说明：评测结果依赖本地数据集、模型、API 配置和当次 LLM-as-Judge 输出。Phase 3 的全量 Planner -> Reason -> Verify 主链路已验证不适合作为默认路径，目前默认采用更轻量的 Citation Guard。
+说明：评测结果依赖本地数据集、模型、API 配置和当次 LLM-as-Judge 输出。Phase 3 的全量 Planner -> Reason -> Verify 主链路已验证不适合作为默认路径，目前默认采用更轻量的 Citation Guard。后续针对 table/chart 的 Guard 放宽和 prompt 结构化注入实验未达到全局保留标准，已回退。
 
 ## 技术栈
 
@@ -255,11 +256,12 @@ docs/                  # API 与开发计划文档
 
 ## 注意事项
 
-- `.env`、`logs/`、`tmp/`、`storage/`、本地编译产物不会提交。
+- `.env`、`logs/`、`tmp/`、`storage/`、`eval_results_*.json`、`docs/superpowers/`、`scripts/__pycache__/`、`scripts/tests/`、本地编译产物不会提交。
+- `tests/` 已加入 `.gitignore`，用于本地评测数据和临时测试资料；如果已有测试文件曾被 Git 跟踪，需要额外取消跟踪后才会完全从变更列表中消失。
 - Notebook 检索体验建议配置 Milvus / Zilliz；未配置时部分 Notebook RAG 能力会降级或不可用。
 - VLM、多模态视觉生成和 Cohere Rerank 均为可选能力，未配置时不会阻断主流程。
 - Docker Compose 使用 `.env`，请不要把真实密钥提交到仓库。
 
 ## License
 
-当前仓库未声明开源许可证。如需对外发布，请先补充许可证文件。
+本项目采用 [MIT License](LICENSE)。

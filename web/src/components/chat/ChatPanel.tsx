@@ -23,7 +23,7 @@ import { useCreateNote } from '@/hooks/useNotes';
 import { useAvailableModels } from '@/hooks/useNotebook';
 import { detectExportIntent } from '@/lib/exportIntent';
 import { useNotebookStore } from '@/store/useNotebookStore';
-import type { ChatMessage as ChatMessageType, ChatSource, Session } from '@/types/api';
+import type { ChatMessage as ChatMessageType, ChatSource } from '@/types/api';
 import type { ExportIntent } from '@/lib/exportIntent';
 
 // ============================================================
@@ -33,7 +33,8 @@ import type { ExportIntent } from '@/lib/exportIntent';
 interface ChatPanelProps {
   notebookId: string;
   sessionId: string | null;
-  onSessionCreate?: () => void | Promise<void>;
+  onSessionCreate?: () => void | Promise<unknown>;
+  disabled?: boolean;
   className?: string;
   /** 从文档指南点击的建议问题（填入输入框） */
   pendingQuery?: string | null;
@@ -74,6 +75,7 @@ export function ChatPanel({
   notebookId,
   sessionId,
   onSessionCreate,
+  disabled = false,
   className,
   pendingQuery,
   onExportIntent,
@@ -93,9 +95,6 @@ export function ChatPanel({
   const { models: availableModels } = useAvailableModels();
   const selectedModel = useNotebookStore((state) => state.selectedModel);
   const setSelectedModel = useNotebookStore((state) => state.setSelectedModel);
-  // 待发送消息：用于无会话时先创建会话再自动发送
-  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
-  const [isCreatingSession, setIsCreatingSession] = useState(false);
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -138,7 +137,7 @@ export function ChatPanel({
 
   const handleSendMessage = useCallback(async () => {
     const trimmedValue = inputValue.trim();
-    if (!trimmedValue || isStreaming) return;
+    if (!trimmedValue || isStreaming || disabled) return;
 
     const exportIntent = detectExportIntent(trimmedValue);
     if (exportIntent && onExportIntent) {
@@ -147,33 +146,14 @@ export function ChatPanel({
       return;
     }
 
-    // 如果没有会话，先创建新会话，再自动发送消息
-    if (!sessionId && onSessionCreate) {
-      setInputValue('');
-      setPendingMessage(trimmedValue);
-      setIsCreatingSession(true);
-      onSessionCreate();
+    if (!sessionId) {
+      toast.error('当前对话还没有准备好，请稍后再发送');
       return;
     }
 
     setInputValue('');
     await sendMessage(trimmedValue, selectedDocumentIds);
-  }, [inputValue, isStreaming, sessionId, onSessionCreate, sendMessage, selectedDocumentIds, onExportIntent]);
-
-  // ============================================================
-  // 当 sessionId 从 null 变为有值时，如果有待发送消息则自动发送
-  // ============================================================
-  useEffect(() => {
-    if (sessionId && pendingMessage) {
-      // 延迟发送，确保 useChat 的 useEffect 已完成历史加载
-      const timer = setTimeout(() => {
-        sendMessage(pendingMessage, selectedDocumentIds);
-        setPendingMessage(null);
-        setIsCreatingSession(false);
-      }, 150);
-      return () => clearTimeout(timer);
-    }
-  }, [sessionId, pendingMessage, sendMessage, selectedDocumentIds]);
+  }, [inputValue, isStreaming, disabled, sessionId, sendMessage, selectedDocumentIds, onExportIntent]);
 
   // ============================================================
   // 键盘事件
@@ -204,17 +184,22 @@ export function ChatPanel({
 
   const onSourceClick = useCallback(
     (source: ChatSource) => {
+      if (!source.document_id) {
+        toast.error('该引用缺少文档定位信息');
+        return;
+      }
       const boundingBox = source.bounding_box && source.bounding_box.length === 4
         ? source.bounding_box
         : [0, 0, 0, 0] as [number, number, number, number];
       // 使用 store 的方法切换到 PDF 视图
       setMainViewToPdf(source.document_id, {
-        pageNumber: source.page_number,
+        pageNumber: Number(source.page_number || 0) + 1,
         boundingBox,
-        sourceId: source.document_id,
+        sourceId: source.citation_id || `${source.document_id}:${source.page_number}:${source.chunk_index}`,
         documentId: source.document_id,
         documentName: source.document_name,
         content: source.content,
+        chunkType: source.chunk_type,
       });
     },
     [setMainViewToPdf]
@@ -230,6 +215,7 @@ export function ChatPanel({
       const cleanedSources = (message.sources || []).map((source) => ({
         document_id: String(source.document_id),
         document_name: String(source.document_name),
+        citation_id: source.citation_id,
         page_number: Number(source.page_number),
         chunk_index: Number(source.chunk_index),
         content: String(source.content),
@@ -382,7 +368,7 @@ export function ChatPanel({
               onKeyDown={handleKeyDown}
               placeholder="输入问题... (Shift+Enter 换行)"
               className="pr-12 resize-none min-h-[44px] max-h-[120px]"
-              disabled={isStreaming}
+              disabled={isStreaming || disabled}
               rows={1}
             />
           </div>
@@ -391,7 +377,7 @@ export function ChatPanel({
           <Button
             size="icon"
             onClick={handleSendMessage}
-            disabled={!inputValue.trim() || isStreaming}
+            disabled={!inputValue.trim() || isStreaming || disabled}
             className="h-11 w-11 flex-shrink-0"
           >
             {isStreaming ? (

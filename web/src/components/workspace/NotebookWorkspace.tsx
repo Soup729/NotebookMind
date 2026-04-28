@@ -19,6 +19,7 @@ import { formatDate } from '@/lib/utils';
 import { useSessionMemory } from '@/hooks/useSessionMemory';
 import { useNotes } from '@/hooks/useNotes';
 import { useGenerateNotebookArtifact, useNotebookArtifacts } from '@/hooks/useNotebookExports';
+import { KnowledgeGraphPanel } from '@/components/workspace/KnowledgeGraphPanel';
 import type { Document, ExportFormat, Session } from '@/types/api';
 
 interface NotebookWorkspaceProps {
@@ -204,6 +205,8 @@ export function NotebookWorkspace({
             )}
           </div>
         </section>
+
+        <KnowledgeGraphPanel notebookId={notebookId} />
       </div>
     </div>
   );

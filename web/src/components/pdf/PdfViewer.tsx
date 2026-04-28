@@ -34,7 +34,10 @@ import type { HighlightTarget } from '@/types/api';
 type LoadedPdfPage = Parameters<NonNullable<React.ComponentProps<typeof Page>['onLoadSuccess']>>[0];
 
 // 配置 PDF.js worker
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url
+).toString();
 
 // ============================================================
 // 类型定义
@@ -73,10 +76,71 @@ export function PdfViewer({
     error: null,
     pageDimensions: { width: 0, height: 0 },
   });
+  const [documentFile, setDocumentFile] = useState<string | null>(null);
 
   // Store
   const highlightTarget = useNotebookStore((state) => state.highlightTarget);
   const setMainViewToGuide = useNotebookStore((state) => state.setMainViewToGuide);
+
+  useEffect(() => {
+    if (!fileUrl) {
+      setDocumentFile(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+
+    setState((prev) => ({
+      ...prev,
+      isLoading: true,
+      error: null,
+    }));
+    setDocumentFile(null);
+
+    const loadPdf = async () => {
+      try {
+        const token = localStorage.getItem('auth_token');
+        const response = await fetch(fileUrl, {
+          signal: controller.signal,
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        });
+
+        if (!response.ok) {
+          if (response.status === 401) {
+            throw new Error('登录状态已失效，请重新登录后再打开引用文档。');
+          }
+          if (response.status === 404) {
+            throw new Error('无法打开该引用文档。文档可能已被删除，或原始 PDF 文件不存在。');
+          }
+          throw new Error(`PDF 加载失败，HTTP ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(blob);
+        setDocumentFile(objectUrl);
+      } catch (err) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        const message = err instanceof Error ? err.message : 'PDF 加载失败';
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          error: message,
+        }));
+      }
+    };
+
+    loadPdf();
+
+    return () => {
+      controller.abort();
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [fileUrl]);
 
   // 计算高亮列表
   const highlights = useMemo(() => {
@@ -340,19 +404,22 @@ export function PdfViewer({
           )}
 
           {/* PDF 文档 */}
-          {!state.isLoading && !state.error && (
+          {!state.error && documentFile && (
             <Document
-              file={fileUrl}
+              file={documentFile}
               onLoadSuccess={onDocumentLoadSuccess}
               onLoadError={(err) => {
+                const detail = err.message.includes('Missing PDF')
+                  ? '无法打开该引用文档。文档可能已被删除，或原始 PDF 文件不存在。'
+                  : err.message;
                 setState((prev) => ({
                   ...prev,
                   isLoading: false,
-                  error: err.message,
+                  error: detail,
                 }));
               }}
               loading={null}
-              className="shadow-lg"
+              className={cn('shadow-lg', state.isLoading && 'invisible')}
             >
               <Page
                 pageNumber={state.currentPage}

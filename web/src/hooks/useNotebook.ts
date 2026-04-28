@@ -19,6 +19,16 @@ import type {
   NoteListParams,
 } from '@/types/api';
 
+type RawSession = Partial<Session> & {
+  ID?: string;
+  UserID?: string;
+  NotebookID?: string;
+  Title?: string;
+  LastMessageAt?: string;
+  CreatedAt?: string;
+  UpdatedAt?: string;
+};
+
 // ============================================================
 // Token 获取（临时方案，后续可接入 Zustand Auth）
 // ============================================================
@@ -27,6 +37,17 @@ const getAuthToken = (): string | null => {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem('auth_token');
 };
+
+function normalizeSession(raw: RawSession): Session {
+  return {
+    id: raw.id || raw.ID || '',
+    user_id: raw.user_id || raw.UserID || '',
+    notebook_id: raw.notebook_id || raw.NotebookID || '',
+    title: raw.title || raw.Title || '新对话',
+    last_message_at: raw.last_message_at || raw.LastMessageAt || raw.created_at || raw.CreatedAt || new Date().toISOString(),
+    created_at: raw.created_at || raw.CreatedAt || new Date().toISOString(),
+  };
+}
 
 // ============================================================
 // 笔记本 Hooks
@@ -311,7 +332,7 @@ export function useDeleteDocument() {
       }
 
       try {
-        await apiFetch(API_ENDPOINTS.document(notebookId, documentId), {
+        await apiFetch(API_ENDPOINTS.documentFile(documentId), {
           method: 'DELETE',
           token,
         });
@@ -424,7 +445,7 @@ export function useSessions(notebookId: string | null) {
   );
 
   return {
-    sessions: data?.items || [],
+    sessions: (data?.items || []).map((item) => normalizeSession(item as RawSession)).filter((session) => session.id),
     isLoading,
     error,
     mutate: boundMutate,
@@ -455,7 +476,11 @@ export function useCreateSession() {
 
         // 不在这里弹 toast — 由调用方统一处理提示
         mutate([API_ENDPOINTS.sessions(notebookId), token]);
-        return response.session;
+        const session = normalizeSession(response.session as RawSession);
+        if (!session.id) {
+          throw new Error('后端创建了会话，但返回中缺少 session id');
+        }
+        return session;
       } catch (err) {
         const error = err instanceof Error ? err : new Error('创建会话失败');
         toast.error('创建会话失败', { description: error.message });

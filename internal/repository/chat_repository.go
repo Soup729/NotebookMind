@@ -37,25 +37,8 @@ type chatRepository struct {
 }
 
 func NewChatRepository(db *gorm.DB) (ChatRepository, error) {
-	// 手动处理 notebook_id 迁移：先添加可空列，更新现有数据，再设为 NOT NULL
-	if err := db.Exec(`ALTER TABLE "chat_sessions" ADD "notebook_id" varchar(36)`).Error; err != nil {
-		// 忽略 "column already exists" 错误
-		if !isColumnExistsError(err) {
-			return nil, fmt.Errorf("add notebook_id column: %w", err)
-		}
-	}
-
-	// 更新现有 NULL 值为空字符串
-	if err := db.Exec(`UPDATE "chat_sessions" SET "notebook_id" = '' WHERE "notebook_id" IS NULL`).Error; err != nil {
-		return nil, fmt.Errorf("update null notebook_id: %w", err)
-	}
-
-	// 设置 NOT NULL 约束
-	if err := db.Exec(`ALTER TABLE "chat_sessions" ALTER COLUMN "notebook_id" SET NOT NULL`).Error; err != nil {
-		// 忽略如果约束已存在
-		if !isNotNullError(err) {
-			return nil, fmt.Errorf("set notebook_id not null: %w", err)
-		}
+	if err := ensureChatSessionSchema(db); err != nil {
+		return nil, fmt.Errorf("ensure chat session schema: %w", err)
 	}
 
 	// 修复 session_id 列类型：从 bigint 改为 varchar(36)，以支持 UUID
@@ -66,10 +49,6 @@ func NewChatRepository(db *gorm.DB) (ChatRepository, error) {
 	// 修复 id 列类型：从 bigint/bigserial 改为 varchar(36)，以支持 UUID 主键
 	if err := fixChatMessageTypeIDColumn(db); err != nil {
 		return nil, fmt.Errorf("fix chat_message id type: %w", err)
-	}
-
-	if err := ensureChatSessionSchema(db); err != nil {
-		return nil, fmt.Errorf("ensure chat session schema: %w", err)
 	}
 
 	if err := db.AutoMigrate(&models.ChatMessage{}); err != nil {

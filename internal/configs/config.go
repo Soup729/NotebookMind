@@ -284,6 +284,27 @@ type MultimodalConfig struct {
 	MinVisualScore          float32 `mapstructure:"min_visual_score"`
 }
 
+// KnowledgeGraphConfig controls the notebook-level graph and its optional semantic index.
+type KnowledgeGraphConfig struct {
+	Enabled       bool                              `mapstructure:"enabled"`
+	Extraction    KnowledgeGraphExtractionConfig    `mapstructure:"extraction"`
+	SemanticIndex KnowledgeGraphSemanticIndexConfig `mapstructure:"semantic_index"`
+}
+
+type KnowledgeGraphExtractionConfig struct {
+	MaxChunksPerDocument int    `mapstructure:"max_chunks_per_document"`
+	MaxEntitiesPerChunk  int    `mapstructure:"max_entities_per_chunk"`
+	RelationStrategy     string `mapstructure:"relation_strategy"`
+}
+
+type KnowledgeGraphSemanticIndexConfig struct {
+	Enabled    bool   `mapstructure:"enabled"`
+	Provider   string `mapstructure:"provider"`
+	Collection string `mapstructure:"collection"`
+	Async      bool   `mapstructure:"async"`
+	FailOpen   bool   `mapstructure:"fail_open"`
+}
+
 // HybridSearchConfig defines hybrid search configuration (Phase 2)
 type HybridSearchConfig struct {
 	Enabled       bool    `mapstructure:"enabled"`
@@ -331,25 +352,26 @@ type CitationGuardConfig struct {
 
 // Config represents the global configuration
 type Config struct {
-	App           AppConfig           `mapstructure:"app"`
-	Log           LogConfig           `mapstructure:"log"`
-	Database      DatabaseConfig      `mapstructure:"database"`
-	Cache         CacheConfig         `mapstructure:"cache"`
-	Milvus        MilvusConfig        `mapstructure:"milvus"`
-	LLM           LLMConfig           `mapstructure:"llm"`
-	Auth          AuthConfig          `mapstructure:"auth"`
-	Upload        UploadConfig        `mapstructure:"upload"`
-	Asynq         AsynqConfig         `mapstructure:"asynq"`
-	Chat          ChatConfig          `mapstructure:"chat"`
-	Parser        ParserConfig        `mapstructure:"parser"`
-	OCR           OCRConfig           `mapstructure:"ocr"`
-	VLM           VLMConfig           `mapstructure:"vlm"`
-	Multimodal    MultimodalConfig    `mapstructure:"multimodal"`
-	HybridSearch  HybridSearchConfig  `mapstructure:"hybrid_search"`
-	Reranker      RerankerConfig      `mapstructure:"reranker"`
-	IntentRewrite IntentRewriteConfig `mapstructure:"intent_rewrite"`
-	TrustWorkflow TrustWorkflowConfig `mapstructure:"trust_workflow"`
-	CitationGuard CitationGuardConfig `mapstructure:"citation_guard"`
+	App            AppConfig            `mapstructure:"app"`
+	Log            LogConfig            `mapstructure:"log"`
+	Database       DatabaseConfig       `mapstructure:"database"`
+	Cache          CacheConfig          `mapstructure:"cache"`
+	Milvus         MilvusConfig         `mapstructure:"milvus"`
+	LLM            LLMConfig            `mapstructure:"llm"`
+	Auth           AuthConfig           `mapstructure:"auth"`
+	Upload         UploadConfig         `mapstructure:"upload"`
+	Asynq          AsynqConfig          `mapstructure:"asynq"`
+	Chat           ChatConfig           `mapstructure:"chat"`
+	Parser         ParserConfig         `mapstructure:"parser"`
+	OCR            OCRConfig            `mapstructure:"ocr"`
+	VLM            VLMConfig            `mapstructure:"vlm"`
+	Multimodal     MultimodalConfig     `mapstructure:"multimodal"`
+	KnowledgeGraph KnowledgeGraphConfig `mapstructure:"knowledge_graph"`
+	HybridSearch   HybridSearchConfig   `mapstructure:"hybrid_search"`
+	Reranker       RerankerConfig       `mapstructure:"reranker"`
+	IntentRewrite  IntentRewriteConfig  `mapstructure:"intent_rewrite"`
+	TrustWorkflow  TrustWorkflowConfig  `mapstructure:"trust_workflow"`
+	CitationGuard  CitationGuardConfig  `mapstructure:"citation_guard"`
 }
 
 // Global config instance
@@ -495,6 +517,39 @@ func overrideFromEnv(cfg *Config) {
 	}
 	cfg.Multimodal.MinVisualScore = float32(envFloat64("MULTIMODAL_MIN_VISUAL_SCORE", float64(cfg.Multimodal.MinVisualScore)))
 
+	// Notebook knowledge graph. Semantic index is off by default so local/dev
+	// deployments do not depend on Milvus for graph rendering.
+	cfg.KnowledgeGraph.Enabled = envBool("KNOWLEDGE_GRAPH_ENABLED", cfg.KnowledgeGraph.Enabled)
+	if !cfg.KnowledgeGraph.Enabled && os.Getenv("KNOWLEDGE_GRAPH_ENABLED") == "" {
+		cfg.KnowledgeGraph.Enabled = true
+	}
+	if cfg.KnowledgeGraph.Extraction.MaxChunksPerDocument == 0 {
+		cfg.KnowledgeGraph.Extraction.MaxChunksPerDocument = 14
+	}
+	if cfg.KnowledgeGraph.Extraction.MaxEntitiesPerChunk == 0 {
+		cfg.KnowledgeGraph.Extraction.MaxEntitiesPerChunk = 5
+	}
+	if cfg.KnowledgeGraph.Extraction.RelationStrategy == "" {
+		cfg.KnowledgeGraph.Extraction.RelationStrategy = "conservative"
+	}
+	cfg.KnowledgeGraph.Extraction.MaxChunksPerDocument = envInt("KNOWLEDGE_GRAPH_MAX_CHUNKS_PER_DOCUMENT", cfg.KnowledgeGraph.Extraction.MaxChunksPerDocument)
+	cfg.KnowledgeGraph.Extraction.MaxEntitiesPerChunk = envInt("KNOWLEDGE_GRAPH_MAX_ENTITIES_PER_CHUNK", cfg.KnowledgeGraph.Extraction.MaxEntitiesPerChunk)
+	cfg.KnowledgeGraph.Extraction.RelationStrategy = envString("KNOWLEDGE_GRAPH_RELATION_STRATEGY", cfg.KnowledgeGraph.Extraction.RelationStrategy)
+	cfg.KnowledgeGraph.SemanticIndex.Enabled = envBool("KNOWLEDGE_GRAPH_SEMANTIC_INDEX_ENABLED", cfg.KnowledgeGraph.SemanticIndex.Enabled)
+	cfg.KnowledgeGraph.SemanticIndex.Provider = envString("KNOWLEDGE_GRAPH_SEMANTIC_INDEX_PROVIDER", cfg.KnowledgeGraph.SemanticIndex.Provider)
+	if cfg.KnowledgeGraph.SemanticIndex.Provider == "" {
+		cfg.KnowledgeGraph.SemanticIndex.Provider = "noop"
+	}
+	cfg.KnowledgeGraph.SemanticIndex.Collection = envString("KNOWLEDGE_GRAPH_SEMANTIC_INDEX_COLLECTION", cfg.KnowledgeGraph.SemanticIndex.Collection)
+	if cfg.KnowledgeGraph.SemanticIndex.Collection == "" {
+		cfg.KnowledgeGraph.SemanticIndex.Collection = "notebook_graph_vectors"
+	}
+	cfg.KnowledgeGraph.SemanticIndex.Async = envBool("KNOWLEDGE_GRAPH_SEMANTIC_INDEX_ASYNC", cfg.KnowledgeGraph.SemanticIndex.Async)
+	cfg.KnowledgeGraph.SemanticIndex.FailOpen = envBool("KNOWLEDGE_GRAPH_SEMANTIC_INDEX_FAIL_OPEN", cfg.KnowledgeGraph.SemanticIndex.FailOpen)
+	if !cfg.KnowledgeGraph.SemanticIndex.FailOpen && os.Getenv("KNOWLEDGE_GRAPH_SEMANTIC_INDEX_FAIL_OPEN") == "" {
+		cfg.KnowledgeGraph.SemanticIndex.FailOpen = true
+	}
+
 	// Phase 2: Hybrid Search
 	cfg.HybridSearch.Enabled = envBool("HYBRID_SEARCH_ENABLED", cfg.HybridSearch.Enabled)
 	if cfg.HybridSearch.RRFK == 0 {
@@ -556,12 +611,6 @@ func overrideFromEnv(cfg *Config) {
 	}
 	cfg.CitationGuard.HighRiskOnly = envBool("CITATION_GUARD_HIGH_RISK_ONLY", cfg.CitationGuard.HighRiskOnly)
 	cfg.CitationGuard.RepairEnabled = envBool("CITATION_GUARD_REPAIR_ENABLED", cfg.CitationGuard.RepairEnabled)
-	if !cfg.CitationGuard.RepairEnabled && os.Getenv("CITATION_GUARD_REPAIR_ENABLED") == "" {
-		cfg.CitationGuard.RepairEnabled = true
-	}
-	if cfg.CitationGuard.MaxRepairAttempts == 0 {
-		cfg.CitationGuard.MaxRepairAttempts = 1
-	}
 	cfg.CitationGuard.MaxRepairAttempts = envInt("CITATION_GUARD_MAX_REPAIR_ATTEMPTS", cfg.CitationGuard.MaxRepairAttempts)
 	if !cfg.CitationGuard.RequireParagraphCitations {
 		cfg.CitationGuard.RequireParagraphCitations = true

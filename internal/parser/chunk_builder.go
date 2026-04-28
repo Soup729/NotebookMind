@@ -50,7 +50,7 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 				pChunk := b.createParentChunk(content, userID, documentID,
 					parentIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 				parentChunks = append(parentChunks, pChunk)
-				children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType)
+				children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 				childChunks = append(childChunks, children...)
 				childIndex += len(children)
 				parentIndex++
@@ -105,7 +105,7 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 				pChunk := b.createParentChunk(content, userID, documentID,
 					parentIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 				parentChunks = append(parentChunks, pChunk)
-				children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType)
+				children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 				childChunks = append(childChunks, children...)
 				childIndex += len(children)
 				parentIndex++
@@ -208,6 +208,8 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 			parentSectionPath = block.SectionPath
 			parentType = block.Type
 			sourceBlockIDs = make([]string, 0)
+		} else {
+			parentBBox = unionBoundingBoxes(parentBBox, block.BBox)
 		}
 
 		currentParent.WriteString(block.Content)
@@ -221,7 +223,7 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 				parentIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 			parentChunks = append(parentChunks, pChunk)
 
-			children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType)
+			children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 			childChunks = append(childChunks, children...)
 			childIndex += len(children)
 			parentIndex++
@@ -237,7 +239,7 @@ func (b *ChunkBuilder) BuildChunks(result *ParseResult, userID, documentID strin
 			parentIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 		parentChunks = append(parentChunks, pChunk)
 
-		children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType)
+		children := b.createChildChunks(content, userID, documentID, pChunk.ID, childIndex, parentPageNum, parentType, parentBBox, parentSectionPath, sourceBlockIDs)
 		childChunks = append(childChunks, children...)
 	}
 
@@ -364,22 +366,48 @@ func (b *ChunkBuilder) createParentChunk(content, userID, documentID string, ind
 	}
 }
 
+func unionBoundingBoxes(a, b BoundingBox) BoundingBox {
+	if a == (BoundingBox{}) {
+		return b
+	}
+	if b == (BoundingBox{}) {
+		return a
+	}
+	out := a
+	if b.X0 < out.X0 {
+		out.X0 = b.X0
+	}
+	if b.Y0 < out.Y0 {
+		out.Y0 = b.Y0
+	}
+	if b.X1 > out.X1 {
+		out.X1 = b.X1
+	}
+	if b.Y1 > out.Y1 {
+		out.Y1 = b.Y1
+	}
+	return out
+}
+
 // createChildChunks 从父内容创建子 chunks
-func (b *ChunkBuilder) createChildChunks(parentContent, userID, documentID, parentID string, startIdx int, pageNum int, chunkType BlockType) []*Chunk {
+func (b *ChunkBuilder) createChildChunks(parentContent, userID, documentID, parentID string, startIdx int, pageNum int, chunkType BlockType, bbox BoundingBox, sectionPath []string, sourceBlocks []string) []*Chunk {
 	runes := []rune(parentContent)
 	totalRunes := len(runes)
 
 	if totalRunes <= b.config.ChildChunkSize {
 		return []*Chunk{{
-			ID:         uuid.NewString(),
-			ParentID:   parentID,
-			Content:    parentContent,
-			DocumentID: documentID,
-			UserID:     userID,
-			PageNum:    pageNum,
-			ChunkIndex: startIdx,
-			ChunkType:  chunkType,
-			Metadata:   map[string]any{"chunk_role": "child"},
+			ID:             uuid.NewString(),
+			ParentID:       parentID,
+			Content:        parentContent,
+			DocumentID:     documentID,
+			UserID:         userID,
+			PageNum:        pageNum,
+			ChunkIndex:     startIdx,
+			ChunkType:      chunkType,
+			BBox:           bbox,
+			SectionPath:    append([]string(nil), sectionPath...),
+			SourceBlockIDs: append([]string(nil), sourceBlocks...),
+			Metadata:       map[string]any{"chunk_role": "child"},
 		}}
 	}
 
@@ -397,15 +425,18 @@ func (b *ChunkBuilder) createChildChunks(parentContent, userID, documentID, pare
 		content = strings.TrimSpace(content)
 		if content != "" {
 			children = append(children, &Chunk{
-				ID:         uuid.NewString(),
-				ParentID:   parentID,
-				Content:    content,
-				DocumentID: documentID,
-				UserID:     userID,
-				PageNum:    pageNum,
-				ChunkIndex: startIdx + len(children),
-				ChunkType:  chunkType,
-				Metadata:   map[string]any{"chunk_role": "child"},
+				ID:             uuid.NewString(),
+				ParentID:       parentID,
+				Content:        content,
+				DocumentID:     documentID,
+				UserID:         userID,
+				PageNum:        pageNum,
+				ChunkIndex:     startIdx + len(children),
+				ChunkType:      chunkType,
+				BBox:           bbox,
+				SectionPath:    append([]string(nil), sectionPath...),
+				SourceBlockIDs: append([]string(nil), sourceBlocks...),
+				Metadata:       map[string]any{"chunk_role": "child"},
 			})
 		}
 

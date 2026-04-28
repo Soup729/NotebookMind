@@ -8,7 +8,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { ArrowLeft, Plus, Loader2, GripHorizontal, MessageSquare, Trash2, ChevronDown, Pencil, Check, X, LayoutDashboard } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { API_BASE_URL, cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -143,8 +143,9 @@ export default function NotebookPage() {
 
   // 当前会话
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
-  // 防止重复创建会话的锁
-  const isCreatingRef = useRef(false);
+  // 防止重复创建会话：多个入口共享同一个进行中的创建请求
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
+  const creatingSessionPromiseRef = useRef<Promise<Session | null> | null>(null);
 
   // 从文档指南点击的建议问题（传递给 ChatPanel 填充输入框）
   const [pendingSuggestedQuery, setPendingSuggestedQuery] = useState<string | null>(null);
@@ -277,28 +278,50 @@ export default function NotebookPage() {
 
   const handleRemoveDocument = useCallback(
     async (docId: string) => {
+      if (!confirm('确定要删除这个文档吗？删除后会同时清理文件、索引、引用与数据库记录，无法恢复。')) {
+        return;
+      }
       const success = await deleteDocument(notebookId, docId);
       if (success) {
-        toast.success('文档已移除');
         // 取消选中
         if (selectedDocumentIds.includes(docId)) {
           toggleDocumentSelection(docId);
         }
+        if (activePdfId === docId) {
+          const nextDoc = documents.find((doc) => doc.id !== docId && doc.status === 'completed');
+          if (nextDoc) {
+            setMainViewToPdf(nextDoc.id);
+          } else {
+            setMainViewToWorkspace();
+          }
+        }
       }
     },
-    [notebookId, deleteDocument, selectedDocumentIds, toggleDocumentSelection]
+    [notebookId, deleteDocument, selectedDocumentIds, toggleDocumentSelection, activePdfId, documents, setMainViewToPdf, setMainViewToWorkspace]
+  );
+
+  const handleOpenDocument = useCallback(
+    (docId: string) => {
+      const doc = documents.find((item) => item.id === docId);
+      if (!doc || doc.status !== 'completed') {
+        return;
+      }
+      setMainViewToPdf(docId);
+    },
+    [documents, setMainViewToPdf]
   );
 
   // ============================================================
   // 会话操作
   // ============================================================
 
-  const handleCreateSession = useCallback(async () => {
-    // 防止重复创建
-    if (isCreatingRef.current) return;
-    isCreatingRef.current = true;
+  const createAndUseSession = useCallback(async () => {
+    if (creatingSessionPromiseRef.current) {
+      return creatingSessionPromiseRef.current;
+    }
 
-    try {
+    setIsCreatingSession(true);
+    const promise = (async () => {
       const session = await createSession(notebookId, {
         title: `新对话 ${new Date().toLocaleString()}`,
       });
@@ -307,11 +330,30 @@ export default function NotebookPage() {
         setActiveSession(session.id);
         toast.success('新会话已创建');
       }
+      return session;
+    })();
+
+    creatingSessionPromiseRef.current = promise;
+    try {
+      return await promise;
     } finally {
-      // 延迟释放锁，防止快速连续点击
-      setTimeout(() => { isCreatingRef.current = false; }, 500);
+      creatingSessionPromiseRef.current = null;
+      setIsCreatingSession(false);
     }
   }, [notebookId, createSession]);
+
+  const handleCreateSession = useCallback(async () => {
+    return createAndUseSession();
+  }, [createAndUseSession]);
+
+  useEffect(() => {
+    if (!_hasHydrated || notebookLoading || sessionsLoading || currentSession || isCreatingSession) {
+      return;
+    }
+    if (sessions.length === 0) {
+      void createAndUseSession();
+    }
+  }, [_hasHydrated, notebookLoading, sessionsLoading, currentSession, isCreatingSession, sessions.length, createAndUseSession]);
 
   const handleDeleteSession = useCallback(
     async (e: React.MouseEvent, sessionId: string) => {
@@ -319,12 +361,27 @@ export default function NotebookPage() {
       if (!confirm('确定要删除这个对话吗？删除后无法恢复。')) {
         return;
       }
+      const deletingCurrentSession = currentSession?.id === sessionId;
       const success = await deleteSession(notebookId, sessionId);
-      if (success && currentSession?.id === sessionId) {
-        setCurrentSession(null);
+      if (success && deletingCurrentSession) {
+        const remaining = sessions
+          .filter((session) => session.id !== sessionId)
+          .sort(
+            (a, b) =>
+              new Date(b.last_message_at).getTime() -
+              new Date(a.last_message_at).getTime()
+          );
+        if (remaining.length > 0) {
+          setCurrentSession(remaining[0]);
+          setActiveSession(remaining[0].id);
+        } else {
+          setCurrentSession(null);
+          setActiveSession(null);
+          await createAndUseSession();
+        }
       }
     },
-    [notebookId, deleteSession, currentSession]
+    [notebookId, deleteSession, currentSession, sessions, setActiveSession, createAndUseSession]
   );
 
   const handleSelectSession = useCallback(
@@ -432,14 +489,15 @@ export default function NotebookPage() {
   // ============================================================
 
   const handleSourceClick = useCallback(
-    (source: { document_id: string; page_number: number; content: string; bounding_box?: [number, number, number, number] }) => {
+    (source: { document_id: string; page_number: number; content: string; bounding_box?: [number, number, number, number]; chunk_type?: string }) => {
       setMainViewToPdf(source.document_id, {
-        pageNumber: source.page_number,
+        pageNumber: Number(source.page_number || 0) + 1,
         boundingBox: source.bounding_box && source.bounding_box.length === 4 ? source.bounding_box : [0, 0, 0, 0],
-        sourceId: source.document_id,
+        sourceId: `${source.document_id}:${source.page_number}`,
         documentId: source.document_id,
         documentName: documents.find((d) => d.id === source.document_id)?.file_name || '',
         content: source.content,
+        chunkType: source.chunk_type,
       });
     },
     [setMainViewToPdf, documents]
@@ -483,8 +541,10 @@ export default function NotebookPage() {
         documents={documents}
         isLoading={docsLoading}
         selectedIds={selectedDocumentIds}
+        activeDocumentId={activePdfId}
         onSelectionChange={handleSelectionChange}
         onUpload={handleUpload}
+        onOpen={handleOpenDocument}
         onRemove={handleRemoveDocument}
         className="flex-shrink-0"
       />
@@ -610,11 +670,14 @@ export default function NotebookPage() {
               onClick={() => {
                 if (activePdfId) {
                   setMainViewToPdf(activePdfId);
-                } else if (documents.length > 0) {
-                  setMainViewToPdf(documents[0].id);
+                } else {
+                  const firstCompletedDoc = documents.find((doc) => doc.status === 'completed');
+                  if (firstCompletedDoc) {
+                    setMainViewToPdf(firstCompletedDoc.id);
+                  }
                 }
               }}
-              disabled={documents.length === 0}
+              disabled={!documents.some((doc) => doc.status === 'completed')}
             >
               PDF
             </Button>
@@ -640,7 +703,7 @@ export default function NotebookPage() {
           ) : activePdfId ? (
             <PdfViewer
               documentId={activePdfId}
-              fileUrl={`/api/documents/${activePdfId}/pdf`}
+              fileUrl={`${API_BASE_URL}/documents/${activePdfId}/pdf`}
             />
           ) : (
             <div className="flex items-center justify-center h-full text-center p-8">
@@ -676,19 +739,19 @@ export default function NotebookPage() {
           <div className="flex-1 min-h-0">
             {/* 等待 Zustand hydrate 完成且 session 已选定后再渲染 ChatPanel */}
             {/* 避免在 sessionId 为 null 时渲染 ChatPanel 导致显示空状态（EmptyState） */}
-            {!_hasHydrated ? (
+            {!_hasHydrated || isCreatingSession ? (
               <div className="flex items-center justify-center h-full">
                 <div className="flex flex-col items-center gap-3 text-muted-foreground">
                   <Loader2 className="w-6 h-6 animate-spin" />
-                  <p className="text-sm">正在恢复会话...</p>
+                  <p className="text-sm">{isCreatingSession ? '正在创建会话...' : '正在恢复会话...'}</p>
                 </div>
               </div>
             ) : (
               <ChatPanel
-                key={currentSession?.id || 'no-session'}
                 notebookId={notebookId}
                 sessionId={currentSession?.id || null}
                 onSessionCreate={handleCreateSession}
+                disabled={sessionsLoading || isCreatingSession || !currentSession}
                 pendingQuery={pendingSuggestedQuery}
                 onExportIntent={handleExportIntent}
                 className="h-full border-0 rounded-none"
