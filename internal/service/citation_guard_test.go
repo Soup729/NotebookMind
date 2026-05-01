@@ -47,6 +47,27 @@ func TestRenderEvidenceCitationsConvertsIDsToCanonicalSources(t *testing.T) {
 	}
 }
 
+func TestRenderEvidenceCitationsMovesInlineIDsToParagraphEndAfterPunctuation(t *testing.T) {
+	pack := EvidencePack{Items: []EvidenceItem{
+		{ID: "E1", DocumentName: "Tutorial 1_final.pdf", PageNumber: 5, Content: "LCD displays temperature and humidity."},
+		{ID: "E2", DocumentName: "Tutorial 1_final.pdf", PageNumber: 6, Content: "LCD shows humidity percentage."},
+		{ID: "E3", DocumentName: "Tutorial 2_final.pdf", PageNumber: 0, Content: "I2C-LCD displays RPM."},
+	}}
+	answer := "Tutorial 1 中，LCD 显示温度和湿度数据 [E1][E2]。而 Tutorial 2 中，I2C-LCD 实时显示 RPM [E3]。"
+
+	rendered := RenderEvidenceCitations(answer, pack)
+
+	if strings.Contains(rendered, "P.6Tutorial") || strings.Contains(rendered, "\n\nTutorial 1_final") {
+		t.Fatalf("citations should not be glued together or broken onto their own paragraph: %q", rendered)
+	}
+	if strings.Contains(rendered, "[E1]") || strings.Contains(rendered, "[E2]") || strings.Contains(rendered, "[E3]") {
+		t.Fatalf("evidence ids should be removed from answer body: %q", rendered)
+	}
+	if !strings.Contains(rendered, "RPM。 [Source: Tutorial 1_final.pdf, Page 6, E1] [Source: Tutorial 1_final.pdf, Page 7, E2] [Source: Tutorial 2_final.pdf, Page 1, E3]") {
+		t.Fatalf("expected all paragraph citations after punctuation, got: %q", rendered)
+	}
+}
+
 func TestValidateCitationBoundAnswerRejectsMissingParagraphCitation(t *testing.T) {
 	pack := EvidencePack{Items: []EvidenceItem{{ID: "E1", DocumentName: "Annual.pdf", PageNumber: 0, Content: "Revenue was $1.85B."}}}
 	result := ValidateCitationBoundAnswer("Revenue was $1.85B.", pack, CitationGuardOptions{RequireParagraphCitations: true, ValidateNumbers: true, MinCitationCoverage: 0.8})

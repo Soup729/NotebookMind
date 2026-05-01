@@ -141,7 +141,7 @@ func NewContainer(ctx context.Context, cfg *configs.Config) (*Container, error) 
 	knowledgeGraphService := service.NewKnowledgeGraphService(notebookGraphRepo, notebookRepo, embedder, graphSemanticIndex)
 	trustWorkflow := service.NewTrustWorkflow(hybridSearchSvc, chatLLM, cfg.TrustWorkflow.MaxRepairAttempts)
 	sessionMemoryService := service.NewSessionMemoryService(chatRepo, chatLLM)
-	notebookChatService := service.NewNotebookChatService(notebookRepo, documentRepo, notebookVectorStore, chatRepo, chatLLM, embedder, cfg.Chat.RetrievalTopK, hybridSearchSvc, intentRewriteSvc, bm25Index, trustWorkflow, &cfg.TrustWorkflow, &cfg.CitationGuard, llmService, &cfg.Multimodal, sessionMemoryService)
+	notebookChatService := service.NewNotebookChatService(notebookRepo, documentRepo, notebookVectorStore, chatRepo, chatLLM, embedder, cfg.Chat.RetrievalTopK, hybridSearchSvc, intentRewriteSvc, bm25Index, trustWorkflow, &cfg.TrustWorkflow, &cfg.CitationGuard, llmService, &cfg.Multimodal, sessionMemoryService, &cfg.StructureEvidence)
 
 	// Initialize Note service
 	noteRepo, err := repository.NewNoteRepository(database.DB)

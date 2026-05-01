@@ -8,28 +8,35 @@ NotebookMind 是一个类 NotebookLM 的文档研究工作台。项目支持 PDF
 
 - **文档理解**：PDF 解析、OCR 降级、表格/图片/图表块识别、页码与 bbox 元数据保留。
 - **Notebook RAG 问答**：Dense + BM25 Hybrid Search、RRF 融合、可选 Cohere Rerank、低置信度 failover。
-- **可信回答**：答案段落绑定证据 ID，后端 Citation Guard 校验引用覆盖和数字支持，再渲染来源引用。
+- **可信回答**：答案段落绑定证据 ID，后端 Citation Guard 校验引用覆盖和数字支持；覆盖型/对比型问题额外使用结构化证据矩阵降低漏召回和证据串台。
 - **多模态证据层**：图片/图表区域可持久化为 visual evidence，VLM 可选生成结构化图表 JSON，视觉问题会优先提升图像/图表证据。
 - **研究工作流**：Notebook 级 briefing、对比、时间线、主题聚类、学习材料、FAQ、关键洞察。
 - **长会话记忆**：按会话自动压缩研究目标、结论、待确认问题和回答偏好，作为低优先级上下文注入问答。
 - **Artifact 导出**：支持 Markdown、Mermaid 思维导图、Word、PPT、PDF；采用“生成大纲 -> 用户确认 -> 异步渲染 -> 下载”的闭环。
 - **前端体验**：Next.js Notebook 页面、工作台视图、SSE 流式聊天、来源列表、PDF 跳转与高亮、导出弹窗与任务进度。
 - **评测体系**：JSONL 离线评测集与 `scripts/notebook_eval.py`，覆盖事实问答、表格、多文档、多轮、图文问答和幻觉检测。
-
+![alt text](image.png)
+![alt text](image-1.png)
+![alt text](image-2.png)
+![alt text](image-3.png)
 ## 当前效果
 
-当前默认链路保留的是“轻量 Citation Guard + Hybrid RAG + 多轮上下文增强”方案。最近一次作为有效基线保留的离线评测结果：
+当前默认链路采用“Hybrid RAG + Structure-first Evidence + Citation Guard + 多轮上下文增强”的轻量可信问答方案。它保留普通语义检索的灵活性，同时针对覆盖型列举、结构项查询、跨文档/跨章节对比做了额外的证据约束：
 
-| 指标 | 结果 |
-| --- | --- |
-| 综合评分 | 87.8 / 100 |
-| Citation Precision | 0.78 |
-| 幻觉率 | 20.0% |
-| Recall@K | 94.7% |
-| 平均延迟 | 7938ms |
-| P95 延迟 | 13200ms |
+- **结构优先证据**：对用户明确提到的章节、表格、Requirement、Lab Session 等 anchor 做优先召回，并补充同 section / 相邻 chunk 上下文。
+- **覆盖型问题增强**：不只依赖 TopK，而是从 notebook/document scoped chunks 做较宽候选扫描，再用 Coverage Matrix 区分 `explicit / related / excluded / missing`。
+- **对比题隔离**：Comparison Matrix 按 subject 分桶，要求每个表格单元只使用本 subject 的证据，减少“把 A 的难点套到 B 上”的问题。
+- **引用可信化**：生成阶段只输出证据 ID，后端统一渲染文档与页码引用；PDF 预览支持页码跳转和 bbox 高亮。
+- **可回滚配置**：`structure_evidence.enabled` 可关闭结构化证据层，便于本地排查或评测对比。
 
-说明：评测结果依赖本地数据集、模型、API 配置和当次 LLM-as-Judge 输出。Phase 3 的全量 Planner -> Reason -> Verify 主链路已验证不适合作为默认路径，目前默认采用更轻量的 Citation Guard。后续针对 table/chart 的 Guard 放宽和 prompt 结构化注入实验未达到全局保留标准，已回退。
+最近一次代码层验证：
+
+```bash
+go test ./...
+cd web && npm run build
+```
+
+说明：离线评测结果依赖本地数据集、模型、API 配置和当次 LLM-as-Judge 输出。Phase 3 的全量 Planner -> Reason -> Verify 主链路已验证不适合作为默认路径，目前默认采用更轻量的 Citation Guard 与结构化证据层。
 
 ## 技术栈
 
@@ -47,35 +54,95 @@ NotebookMind 是一个类 NotebookLM 的文档研究工作台。项目支持 PDF
 
 ## 架构概览
 
-```text
-Frontend (Next.js)
-  |
-  | REST / SSE
-  v
-API Server (Gin)
-  |-- Auth / Documents / Chat / Notebook / Session Memory / Notes / Artifacts / Exports / VQA
-  |-- Citation Guard
-  |-- Hybrid Search
-  |
-  | PostgreSQL
-  | Redis Queue
-  | Milvus / BM25
-  v
-Worker (Asynq)
-  |-- PDF parse
-  |-- OCR / VLM enrichment
-  |-- chunking / embedding / indexing
-  |-- guide generation
-  |-- export rendering
+```mermaid
+flowchart LR
+  U[User Browser] --> W[Next.js Web]
+  W -->|REST / SSE| API[Go API Server Gin]
+
+  API --> Auth[Auth / Notebook / Document / Chat Handlers]
+  API --> Chat[Notebook Chat Service]
+  API --> Artifact[Artifact & Export Service]
+  API --> Note[Notes / Workspace Service]
+
+  Chat --> IR[Intent Routing / Query Rewrite]
+  Chat --> SE[Structure-first Evidence Resolver]
+  Chat --> HS[Hybrid Search Dense + BM25 + RRF]
+  Chat --> CG[Citation Guard]
+  Chat --> LLM[LLM Provider]
+
+  API --> PG[(PostgreSQL)]
+  API --> Redis[(Redis / Asynq)]
+  HS --> Milvus[(Milvus / Zilliz)]
+  HS --> BM25[(In-memory BM25)]
+
+  Redis --> Worker[Go Worker]
+  Worker --> Parser[Parser / OCR / VLM Enrichment]
+  Worker --> Index[Chunking / Embedding / Indexing]
+  Worker --> Guide[Guide / Summary Generation]
+  Worker --> Export[Markdown / Mindmap / Word / PPT / PDF Rendering]
+
+  Parser --> Milvus
+  Index --> Milvus
+  Index --> BM25
+  Worker --> PG
 ```
 
-关键链路：
+### 标准处理流程
 
-1. 用户上传 PDF 到 `POST /api/v1/documents`，可附带 `notebook_id`。
-2. API 保存文件和元数据，并投递 Asynq 文档处理任务。
-3. Worker 解析 PDF，构建 parent/child chunks，写入向量库和 BM25。
-4. Notebook chat 通过 Hybrid RAG 检索证据，生成回答并进行引用校验。
-5. 前端展示 SSE 回答、来源、页码和 bbox 高亮。
+```mermaid
+sequenceDiagram
+  autonumber
+  participant User as User
+  participant Web as Next.js Web
+  participant API as Go API
+  participant Queue as Redis / Asynq
+  participant Worker as Worker
+  participant Store as PostgreSQL
+  participant Vector as Milvus + BM25
+  participant LLM as LLM
+
+  User->>Web: 上传 PDF / 选择 Notebook
+  Web->>API: POST /api/v1/documents
+  API->>Store: 保存文档元数据
+  API->>Queue: 投递文档处理任务
+  Worker->>Queue: 消费任务
+  Worker->>Worker: PDF 解析 / OCR / 表格图片块处理
+  Worker->>Vector: 写入 chunks、embedding、BM25 索引
+  Worker->>Store: 更新处理状态与指南摘要
+
+  User->>Web: 在 Notebook 中提问
+  Web->>API: SSE Chat Request
+  API->>Vector: Hybrid Search + Structure-first Evidence
+  API->>LLM: 证据矩阵 + Evidence Blocks
+  LLM-->>API: 带 Evidence ID 的回答
+  API->>API: Citation Guard 校验与引用渲染
+  API-->>Web: SSE 返回回答、来源、页码、bbox
+  Web-->>User: 展示回答、引用跳转与 PDF 高亮
+```
+
+### 问答证据流程
+
+```mermaid
+flowchart TD
+  Q[User Question] --> Mode[Answer Mode Classification]
+  Mode --> Routes[Hybrid Retrieval Routes]
+  Mode --> Anchors[Anchor / Exact Phrase Extraction]
+  Routes --> TopK[Dense + BM25 TopK]
+  Anchors --> Broad[Notebook / Document scoped broad chunks]
+  Broad --> Resolver[StructureEvidence Resolver]
+  TopK --> Resolver
+  Resolver --> Merge[Quota-based Merge before final cap]
+  Merge --> Matrix{Question Type}
+  Matrix -->|Coverage| Coverage[Coverage Matrix explicit / related / excluded / missing]
+  Matrix -->|Comparison| Compare[Comparison Matrix subject-isolated evidence]
+  Matrix -->|Other| Evidence[Evidence Blocks]
+  Coverage --> Prompt[LLM Prompt]
+  Compare --> Prompt
+  Evidence --> Prompt
+  Prompt --> Answer[Answer with Evidence IDs]
+  Answer --> Guard[Citation Guard]
+  Guard --> Render[Rendered citations + PDF highlight metadata]
+```
 
 ## 快速启动
 

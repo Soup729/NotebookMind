@@ -77,7 +77,7 @@ func BuildEvidencePack(results []HybridResult, sources []NotebookChatSource, pla
 func (p EvidencePack) FormatForPrompt() string {
 	var builder strings.Builder
 	for _, item := range p.Items {
-		builder.WriteString(fmt.Sprintf("[%s] [Source: %s, Page %d]\n", item.ID, item.DocumentName, item.PageNumber+1))
+		builder.WriteString(fmt.Sprintf("[%s] [Source: %s, %s]\n", item.ID, item.DocumentName, formatEvidencePage(item.PageNumber)))
 		if item.ChunkType != "" {
 			builder.WriteString("Type: ")
 			builder.WriteString(item.ChunkType)

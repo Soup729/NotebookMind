@@ -350,28 +350,37 @@ type CitationGuardConfig struct {
 	FailClosedForHighRisk     bool    `mapstructure:"fail_closed_for_high_risk"`
 }
 
+// StructureEvidenceConfig controls notebook structure-first retrieval.
+type StructureEvidenceConfig struct {
+	Enabled              bool `mapstructure:"enabled"`
+	MaxChunksPerDocument int  `mapstructure:"max_chunks_per_document"`
+	AnchorContextWindow  int  `mapstructure:"anchor_context_window"`
+	MaxEvidence          int  `mapstructure:"max_evidence"`
+}
+
 // Config represents the global configuration
 type Config struct {
-	App            AppConfig            `mapstructure:"app"`
-	Log            LogConfig            `mapstructure:"log"`
-	Database       DatabaseConfig       `mapstructure:"database"`
-	Cache          CacheConfig          `mapstructure:"cache"`
-	Milvus         MilvusConfig         `mapstructure:"milvus"`
-	LLM            LLMConfig            `mapstructure:"llm"`
-	Auth           AuthConfig           `mapstructure:"auth"`
-	Upload         UploadConfig         `mapstructure:"upload"`
-	Asynq          AsynqConfig          `mapstructure:"asynq"`
-	Chat           ChatConfig           `mapstructure:"chat"`
-	Parser         ParserConfig         `mapstructure:"parser"`
-	OCR            OCRConfig            `mapstructure:"ocr"`
-	VLM            VLMConfig            `mapstructure:"vlm"`
-	Multimodal     MultimodalConfig     `mapstructure:"multimodal"`
-	KnowledgeGraph KnowledgeGraphConfig `mapstructure:"knowledge_graph"`
-	HybridSearch   HybridSearchConfig   `mapstructure:"hybrid_search"`
-	Reranker       RerankerConfig       `mapstructure:"reranker"`
-	IntentRewrite  IntentRewriteConfig  `mapstructure:"intent_rewrite"`
-	TrustWorkflow  TrustWorkflowConfig  `mapstructure:"trust_workflow"`
-	CitationGuard  CitationGuardConfig  `mapstructure:"citation_guard"`
+	App               AppConfig               `mapstructure:"app"`
+	Log               LogConfig               `mapstructure:"log"`
+	Database          DatabaseConfig          `mapstructure:"database"`
+	Cache             CacheConfig             `mapstructure:"cache"`
+	Milvus            MilvusConfig            `mapstructure:"milvus"`
+	LLM               LLMConfig               `mapstructure:"llm"`
+	Auth              AuthConfig              `mapstructure:"auth"`
+	Upload            UploadConfig            `mapstructure:"upload"`
+	Asynq             AsynqConfig             `mapstructure:"asynq"`
+	Chat              ChatConfig              `mapstructure:"chat"`
+	Parser            ParserConfig            `mapstructure:"parser"`
+	OCR               OCRConfig               `mapstructure:"ocr"`
+	VLM               VLMConfig               `mapstructure:"vlm"`
+	Multimodal        MultimodalConfig        `mapstructure:"multimodal"`
+	KnowledgeGraph    KnowledgeGraphConfig    `mapstructure:"knowledge_graph"`
+	HybridSearch      HybridSearchConfig      `mapstructure:"hybrid_search"`
+	Reranker          RerankerConfig          `mapstructure:"reranker"`
+	IntentRewrite     IntentRewriteConfig     `mapstructure:"intent_rewrite"`
+	TrustWorkflow     TrustWorkflowConfig     `mapstructure:"trust_workflow"`
+	CitationGuard     CitationGuardConfig     `mapstructure:"citation_guard"`
+	StructureEvidence StructureEvidenceConfig `mapstructure:"structure_evidence"`
 }
 
 // Global config instance
@@ -628,6 +637,24 @@ func overrideFromEnv(cfg *Config) {
 		cfg.CitationGuard.FailClosedForHighRisk = true
 	}
 	cfg.CitationGuard.FailClosedForHighRisk = envBool("CITATION_GUARD_FAIL_CLOSED_FOR_HIGH_RISK", cfg.CitationGuard.FailClosedForHighRisk)
+
+	// Structure-first evidence retrieval for notebook chat
+	cfg.StructureEvidence.Enabled = envBool("STRUCTURE_EVIDENCE_ENABLED", cfg.StructureEvidence.Enabled)
+	if !cfg.StructureEvidence.Enabled && os.Getenv("STRUCTURE_EVIDENCE_ENABLED") == "" {
+		cfg.StructureEvidence.Enabled = true
+	}
+	if cfg.StructureEvidence.MaxChunksPerDocument == 0 {
+		cfg.StructureEvidence.MaxChunksPerDocument = 500
+	}
+	cfg.StructureEvidence.MaxChunksPerDocument = envInt("STRUCTURE_EVIDENCE_MAX_CHUNKS_PER_DOCUMENT", cfg.StructureEvidence.MaxChunksPerDocument)
+	if cfg.StructureEvidence.AnchorContextWindow == 0 {
+		cfg.StructureEvidence.AnchorContextWindow = 3
+	}
+	cfg.StructureEvidence.AnchorContextWindow = envInt("STRUCTURE_EVIDENCE_ANCHOR_CONTEXT_WINDOW", cfg.StructureEvidence.AnchorContextWindow)
+	if cfg.StructureEvidence.MaxEvidence == 0 {
+		cfg.StructureEvidence.MaxEvidence = 24
+	}
+	cfg.StructureEvidence.MaxEvidence = envInt("STRUCTURE_EVIDENCE_MAX_EVIDENCE", cfg.StructureEvidence.MaxEvidence)
 }
 
 func validateConfig(cfg *Config) error {

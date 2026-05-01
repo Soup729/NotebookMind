@@ -45,19 +45,74 @@ func BuildEvidencePackFromNotebookSources(sources []NotebookChatSource) Evidence
 }
 
 func RenderEvidenceCitations(answer string, pack EvidencePack) string {
-	rendered := evidenceIDPattern.ReplaceAllStringFunc(answer, func(match string) string {
-		id := strings.Trim(match, "[]")
-		item, ok := pack.SourceByID(id)
-		if !ok {
-			return match
-		}
-		return fmt.Sprintf("[Source: %s, Page %d, %s]", item.DocumentName, item.PageNumber+1, item.ID)
-	})
+	rendered := renderParagraphEndEvidenceCitations(answer, pack)
 	return collapseConsecutiveDuplicateCitations(rendered)
 }
 
 var trailingSourceCitationRunPattern = regexp.MustCompile(`(?:\s*\[Source:\s*[^\]]+\])+\s*$`)
 var sourceCitationDocumentPagePattern = regexp.MustCompile(`\[Source:\s*([^,\]]+),\s*Page\s+(\d+)(?:,\s*E\d+)?\]`)
+
+func renderParagraphEndEvidenceCitations(answer string, pack EvidencePack) string {
+	paragraphs := answerParagraphs(answer)
+	if len(paragraphs) == 0 {
+		return strings.TrimSpace(answer)
+	}
+	rendered := make([]string, 0, len(paragraphs))
+	for _, paragraph := range paragraphs {
+		ids := evidenceIDsInText(paragraph)
+		if len(ids) == 0 {
+			rendered = append(rendered, paragraph)
+			continue
+		}
+
+		citations := make([]string, 0, len(ids))
+		seenCitation := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			item, ok := pack.SourceByID(id)
+			if !ok {
+				continue
+			}
+			key := strings.ToLower(strings.TrimSpace(item.DocumentName)) + "|" + strconv.FormatInt(item.PageNumber, 10)
+			if _, ok := seenCitation[key]; ok {
+				continue
+			}
+			seenCitation[key] = struct{}{}
+			citations = append(citations, fmt.Sprintf("[Source: %s, %s, %s]", item.DocumentName, formatEvidencePage(item.PageNumber), item.ID))
+		}
+		if len(citations) == 0 {
+			rendered = append(rendered, paragraph)
+			continue
+		}
+		cleaned := cleanParagraphAfterRemovingEvidenceIDs(evidenceIDPattern.ReplaceAllString(paragraph, ""))
+		rendered = append(rendered, strings.TrimSpace(cleaned+" "+strings.Join(citations, " ")))
+	}
+	return strings.Join(rendered, "\n\n")
+}
+
+func cleanParagraphAfterRemovingEvidenceIDs(paragraph string) string {
+	paragraph = strings.Join(strings.Fields(paragraph), " ")
+	replacements := []struct {
+		old string
+		new string
+	}{
+		{" 。", "。"},
+		{" ，", "，"},
+		{" ；", "；"},
+		{" ：", "："},
+		{" ！", "！"},
+		{" ？", "？"},
+		{" .", "."},
+		{" ,", ","},
+		{" ;", ";"},
+		{" :", ":"},
+		{" !", "!"},
+		{" ?", "?"},
+	}
+	for _, replacement := range replacements {
+		paragraph = strings.ReplaceAll(paragraph, replacement.old, replacement.new)
+	}
+	return strings.TrimSpace(paragraph)
+}
 
 func collapseConsecutiveDuplicateCitations(answer string) string {
 	paragraphs := answerParagraphs(answer)

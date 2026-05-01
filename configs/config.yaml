@@ -166,3 +166,10 @@ citation_guard:
   validate_entity_phrases: true
   min_citation_coverage: 0.8
   fail_closed_for_high_risk: true
+
+# 结构优先证据检索：为覆盖型/对比型问题补充文档范围扫描与强证据配额
+structure_evidence:
+  enabled: true
+  max_chunks_per_document: 500
+  anchor_context_window: 3
+  max_evidence: 24
