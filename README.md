@@ -29,15 +29,6 @@ NotebookMind 是一个类 NotebookLM 的文档研究工作台。项目支持 PDF
 - **引用可信化**：生成阶段只输出证据 ID，后端统一渲染文档与页码引用；PDF 预览支持页码跳转和 bbox 高亮。
 - **可回滚配置**：`structure_evidence.enabled` 可关闭结构化证据层，便于本地排查或评测对比。
 
-最近一次代码层验证：
-
-```bash
-go test ./...
-cd web && npm run build
-```
-
-说明：离线评测结果依赖本地数据集、模型、API 配置和当次 LLM-as-Judge 输出。Phase 3 的全量 Planner -> Reason -> Verify 主链路已验证不适合作为默认路径，目前默认采用更轻量的 Citation Guard 与结构化证据层。
-
 ## 技术栈
 
 | 层级 | 技术 |
@@ -218,67 +209,6 @@ docker compose down
 
 > 当前仓库只保留一个 `docker-compose.yaml`。它会启动 PostgreSQL、Redis、API、Worker 和 Web。
 
-### 4. 手动本地启动
-
-仅启动依赖：
-
-```bash
-docker compose up -d postgres redis
-```
-
-启动 API：
-
-```bash
-go run ./cmd/api
-```
-
-启动 Worker：
-
-```bash
-go run ./cmd/worker
-```
-
-启动前端：
-
-```bash
-cd web
-npm install
-npm run dev
-```
-
-如果需要 Word / PPT / PDF 导出：
-
-```bash
-python -m pip install -r scripts/requirements-export.txt
-```
-
-## 测试与评测
-
-后端测试：
-
-```bash
-go test ./...
-```
-
-前端构建：
-
-```bash
-cd web
-npm run build
-```
-
-评测脚本：
-
-```bash
-python scripts/notebook_eval.py --api-base http://localhost:8081/api/v1 -v
-```
-
-不调用 Judge 的快速冒烟：
-
-```bash
-python scripts/notebook_eval.py --api-base http://localhost:8081/api/v1 --no-judge -v
-```
-
 ## 主要 API
 
 API 基础路径：`/api/v1`
@@ -323,11 +253,9 @@ docs/                  # API 与开发计划文档
 
 ## 注意事项
 
-- `.env`、`logs/`、`tmp/`、`storage/`、`eval_results_*.json`、`docs/superpowers/`、`scripts/__pycache__/`、`scripts/tests/`、本地编译产物不会提交。
-- `tests/` 已加入 `.gitignore`，用于本地评测数据和临时测试资料；如果已有测试文件曾被 Git 跟踪，需要额外取消跟踪后才会完全从变更列表中消失。
 - Notebook 检索体验建议配置 Milvus / Zilliz；未配置时部分 Notebook RAG 能力会降级或不可用。
 - VLM、多模态视觉生成和 Cohere Rerank 均为可选能力，未配置时不会阻断主流程。
-- Docker Compose 使用 `.env`，请不要把真实密钥提交到仓库。
+- Docker Compose 使用 `.env`。
 
 ## License
 
