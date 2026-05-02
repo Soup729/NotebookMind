@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import {
   BookOpen,
   Brain,
@@ -19,8 +20,15 @@ import { formatDate } from '@/lib/utils';
 import { useSessionMemory } from '@/hooks/useSessionMemory';
 import { useNotes } from '@/hooks/useNotes';
 import { useGenerateNotebookArtifact, useNotebookArtifacts } from '@/hooks/useNotebookExports';
-import { KnowledgeGraphPanel } from '@/components/workspace/KnowledgeGraphPanel';
 import type { Document, ExportFormat, Session } from '@/types/api';
+
+const KnowledgeGraphPanel = dynamic(
+  () => import('@/components/workspace/KnowledgeGraphPanel').then((mod) => mod.KnowledgeGraphPanel),
+  {
+    ssr: false,
+    loading: () => <GraphIslandLoading />,
+  }
+);
 
 interface NotebookWorkspaceProps {
   notebookId: string;
@@ -223,6 +231,25 @@ function MemoryList({ title, items }: { title: string; items?: string[] }) {
         ))}
       </ul>
     </div>
+  );
+}
+
+function GraphIslandLoading() {
+  return (
+    <section className="rounded-lg border bg-background p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">正在加载知识图谱...</p>
+      </div>
+      <div className="grid gap-4 xl:grid-cols-[1fr_320px]">
+        <Skeleton className="h-[420px] w-full rounded-md" />
+        <div className="space-y-2 rounded-md border p-3">
+          <Skeleton className="h-4 w-1/3" />
+          <Skeleton className="h-6 w-2/3" />
+          <Skeleton className="h-16 w-full" />
+        </div>
+      </div>
+    </section>
   );
 }
 

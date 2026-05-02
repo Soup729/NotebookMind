@@ -6,6 +6,7 @@
     "dev": "next dev",
     "prebuild": "node -e \"require('fs').rmSync('.next/dev',{recursive:true,force:true})\"",
     "build": "next build",
+    "check:islands": "node scripts/assert-notebook-islands.mjs",
     "start": "next start",
     "lint": "next lint"
   },

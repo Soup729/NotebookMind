@@ -10,6 +10,7 @@ import React, {
   useCallback,
   useEffect,
 } from 'react';
+import dynamic from 'next/dynamic';
 import type { KeyboardEvent } from 'react';
 import { Send, Loader2, Plus, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
@@ -17,7 +18,6 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ChatMessage } from './ChatMessage';
 import { useChat, useSourceCitation } from '@/hooks/useChat';
 import { useCreateNote } from '@/hooks/useNotes';
 import { useAvailableModels } from '@/hooks/useNotebook';
@@ -41,9 +41,29 @@ interface ChatPanelProps {
   onExportIntent?: (intent: ExportIntent) => void;
 }
 
+const ChatMessage = dynamic(
+  () => import('./ChatMessage').then((mod) => mod.ChatMessage),
+  {
+    ssr: false,
+    loading: () => <MessageLoading />,
+  }
+);
+
 // ============================================================
 // 空状态组件
 // ============================================================
+
+function MessageLoading() {
+  return (
+    <div className="flex gap-3 p-4">
+      <Skeleton className="h-8 w-8 rounded-full" />
+      <div className="flex-1 space-y-2">
+        <Skeleton className="h-4 w-1/4" />
+        <Skeleton className="h-4 w-3/4" />
+      </div>
+    </div>
+  );
+}
 
 function EmptyState({ onNewChat, hasDocuments }: { onNewChat?: () => void; hasDocuments?: boolean }) {
   return (

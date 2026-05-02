@@ -5,6 +5,7 @@
 'use client';
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import dynamic from 'next/dynamic';
 import { useParams, useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { ArrowLeft, Plus, Loader2, GripHorizontal, MessageSquare, Trash2, ChevronDown, Pencil, Check, X, LayoutDashboard } from 'lucide-react';
@@ -21,17 +22,7 @@ import {
 // 布局组件
 import { SourcesPanel } from '@/components/layout/SourcesPanel';
 import { NotesPanel } from '@/components/layout/NotesPanel';
-import { ChatPanel } from '@/components/chat/ChatPanel';
-import { ExportDialog } from '@/components/export/ExportDialog';
 import { ExportFormatMenu } from '@/components/export/ExportFormatMenu';
-import { ExportTaskTray } from '@/components/export/ExportTaskTray';
-import { NotebookWorkspace } from '@/components/workspace/NotebookWorkspace';
-
-// PDF 查看器
-import { PdfViewer } from '@/components/pdf/PdfViewer';
-
-// 指南组件
-import { DocumentGuide } from '@/components/guide/DocumentGuide';
 
 // Hooks
 import { useNotebook } from '@/hooks/useNotebook';
@@ -40,6 +31,74 @@ import { useSessions, useCreateSession, useDeleteSession } from '@/hooks/useNote
 import { useNotebookStore } from '@/store/useNotebookStore';
 
 import type { Session, Document, ExportFormat, NotebookArtifact } from '@/types/api';
+
+const ChatPanel = dynamic(
+  () => import('@/components/chat/ChatPanel').then((mod) => mod.ChatPanel),
+  {
+    ssr: false,
+    loading: () => <IslandLoading label="正在加载对话..." compact />,
+  }
+);
+
+const ExportDialog = dynamic(
+  () => import('@/components/export/ExportDialog').then((mod) => mod.ExportDialog),
+  { ssr: false }
+);
+
+const ExportTaskTray = dynamic(
+  () => import('@/components/export/ExportTaskTray').then((mod) => mod.ExportTaskTray),
+  { ssr: false }
+);
+
+const NotebookWorkspace = dynamic(
+  () => import('@/components/workspace/NotebookWorkspace').then((mod) => mod.NotebookWorkspace),
+  {
+    ssr: false,
+    loading: () => <IslandLoading label="正在加载工作台..." />,
+  }
+);
+
+const PdfViewer = dynamic(
+  () => import('@/components/pdf/PdfViewer').then((mod) => mod.PdfViewer),
+  {
+    ssr: false,
+    loading: () => <IslandLoading label="正在加载 PDF 阅读器..." />,
+  }
+);
+
+const DocumentGuide = dynamic(
+  () => import('@/components/guide/DocumentGuide').then((mod) => mod.DocumentGuide),
+  {
+    ssr: false,
+    loading: () => <IslandLoading label="正在加载文档指南..." />,
+  }
+);
+
+function IslandLoading({ label, compact = false }: { label: string; compact?: boolean }) {
+  if (compact) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          {label}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full p-6">
+      <div className="mx-auto max-w-5xl space-y-4">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          {label}
+        </div>
+        <Skeleton className="h-10 w-1/3" />
+        <Skeleton className="h-64 w-full" />
+      </div>
+    </div>
+  );
+}
 
 // ============================================================
 // 指南视图组件
@@ -770,21 +829,25 @@ export default function NotebookPage() {
         />
       </div>
 
-      <ExportDialog
-        open={exportDialogOpen}
-        notebookId={notebookId}
-        documents={documents}
-        selectedDocumentIds={selectedDocumentIds}
-        initialFormat={exportFormat}
-        initialRequirements={exportRequirements}
-        onClose={() => setExportDialogOpen(false)}
-        onTaskStart={handleExportTaskStart}
-      />
-      <ExportTaskTray
-        notebookId={notebookId}
-        artifactId={activeExportArtifactId}
-        onClear={() => setActiveExportArtifactId(null)}
-      />
+      {exportDialogOpen && (
+        <ExportDialog
+          open={exportDialogOpen}
+          notebookId={notebookId}
+          documents={documents}
+          selectedDocumentIds={selectedDocumentIds}
+          initialFormat={exportFormat}
+          initialRequirements={exportRequirements}
+          onClose={() => setExportDialogOpen(false)}
+          onTaskStart={handleExportTaskStart}
+        />
+      )}
+      {activeExportArtifactId && (
+        <ExportTaskTray
+          notebookId={notebookId}
+          artifactId={activeExportArtifactId}
+          onClear={() => setActiveExportArtifactId(null)}
+        />
+      )}
     </div>
   );
 }
